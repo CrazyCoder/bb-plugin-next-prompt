@@ -38,8 +38,24 @@ export interface CompletionRequest {
 }
 
 const MAX_OUTPUT_CHARS = 1_000_000;
-const CLAUDE_EFFORTS = new Set(["medium", "high", "xhigh", "max"]);
-const CODEX_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+/** bb reasoning level → `claude --effort`. Low is absent: it turns thinking off instead. */
+const CLAUDE_EFFORTS: Record<string, string> = {
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	ultracode: "max",
+	max: "max",
+};
+/** bb reasoning level → codex `model_reasoning_effort`, whose highest value is xhigh. */
+const CODEX_EFFORTS: Record<string, string> = {
+	minimal: "minimal",
+	low: "low",
+	medium: "medium",
+	high: "high",
+	xhigh: "xhigh",
+	max: "xhigh",
+	ultra: "xhigh",
+};
 
 function run(
 	command: string,
@@ -85,11 +101,12 @@ export async function completeWithClaude(
 	selection: ModelSelection,
 	request: CompletionRequest,
 ): Promise<string> {
-	const thinking = CLAUDE_EFFORTS.has(selection.reasoningLevel);
+	const effort = Object.hasOwn(CLAUDE_EFFORTS, selection.reasoningLevel) ? CLAUDE_EFFORTS[selection.reasoningLevel] : undefined;
+	const thinking = effort !== undefined;
 	const args = [
 		"-p",
 		"--model", selection.model,
-		...(thinking ? ["--effort", selection.reasoningLevel] : []),
+		...(effort ? ["--effort", effort] : []),
 		"--tools", "",
 		"--strict-mcp-config",
 		"--setting-sources", "",
@@ -115,7 +132,7 @@ export async function completeWithCodex(
 	const dir = await mkdtemp(join(tmpdir(), "bb-next-prompt-"));
 	try {
 		const outFile = join(dir, "last-message.txt");
-		const effort = CODEX_EFFORTS.has(selection.reasoningLevel) ? selection.reasoningLevel : "low";
+		const effort = Object.hasOwn(CODEX_EFFORTS, selection.reasoningLevel) ? CODEX_EFFORTS[selection.reasoningLevel] : "low";
 		const args = [
 			"exec",
 			"--skip-git-repo-check",

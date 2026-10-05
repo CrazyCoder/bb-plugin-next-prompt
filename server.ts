@@ -78,7 +78,7 @@ export default async function plugin(bb: BbPluginApi) {
 			type: "select",
 			label: "HTTP API override",
 			description:
-				"off uses the model picked above. anthropic or openai sends every request to the API below instead.",
+				"off uses the model chosen under Suggestion model. anthropic or openai sends every request to the API set below instead.",
 			options: [...API_FORMATS],
 			default: "off",
 		},
