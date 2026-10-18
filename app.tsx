@@ -78,6 +78,9 @@ function findEditor(banner: HTMLElement): HTMLElement | null {
 
 /** Accept on a right swipe that starts in the editor. */
 function useSwipeToAccept(rootRef: RefObject<HTMLElement | null>, active: boolean, accept: () => void) {
+	// Read through a ref, so a re-render mid-gesture does not reattach the listeners and reset the tracker.
+	const acceptRef = useRef(accept);
+	acceptRef.current = accept;
 	useEffect(() => {
 		const root = rootRef.current;
 		const editor = active && root ? findEditor(root) : null;
@@ -98,7 +101,7 @@ function useSwipeToAccept(rootRef: RefObject<HTMLElement | null>, active: boolea
 			if (event.touches.length !== 0 || !touch) return tracker.cancel();
 			if (!tracker.end(touch.clientX, touch.clientY, event.timeStamp)) return;
 			if (event.cancelable) event.preventDefault();
-			accept();
+			acceptRef.current();
 		};
 		const onCancel = () => tracker.cancel();
 		editor.addEventListener("touchstart", onStart, { capture: true, passive: true });
@@ -111,7 +114,7 @@ function useSwipeToAccept(rootRef: RefObject<HTMLElement | null>, active: boolea
 			editor.removeEventListener("touchend", onEnd, true);
 			editor.removeEventListener("touchcancel", onCancel, true);
 		};
-	}, [rootRef, active, accept]);
+	}, [rootRef, active]);
 }
 
 function SuggestionBanner({ threadId, composer }: { threadId: string; composer: PluginComposerApi }) {

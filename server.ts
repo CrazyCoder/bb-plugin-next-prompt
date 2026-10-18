@@ -74,6 +74,8 @@ type Held = Suggestion & { fingerprint: string };
 const MAX_TIMELINE_PAGES = 5;
 const MODEL_SELECTION_KEY = "model-selection";
 const STORED_PREFIX = "suggestion:";
+/** A child in any of these is queued, starting or running, so its parent is not done. */
+const CHILD_WORKING_STATUSES = ["pending", "starting", "active"] as const;
 /** Records of threads deleted while the plugin was not loaded are dropped after this. */
 const STORED_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Least to most permissive; a worker gets the first one its provider supports. */
@@ -214,9 +216,16 @@ export default async function plugin(bb: BbPluginApi) {
 	const inFlight = new Map<string, AbortController>();
 	/** Threads whose stored record this load has already checked against the conversation. */
 	const restored = new Set<string>();
+	/** One restore check per thread, shared by every client asking at once. */
+	const restoring = new Map<string, Promise<Held | null>>();
+	/** Bumped when a thread moves on, so work begun before that discards its result. */
+	const epochs = new Map<string, number>();
+	const epoch = (threadId: string) => epochs.get(threadId) ?? 0;
 	const outcomes: Outcome[] = [];
 	let disposed = false;
 
+	// Covers what decides the reply, not normalizeSuggestion's filter: a looser
+	// filter in a later release leaves "silent" records until the thread moves on.
 	const fingerprint = (prompt: string) =>
 		createHash("sha256").update(SYSTEM_PROMPT).update("\0").update(describeRoute()).update("\0").update(prompt).digest("hex");
 
@@ -253,6 +262,7 @@ export default async function plugin(bb: BbPluginApi) {
 	const clear = (threadId: string) => {
 		inFlight.get(threadId)?.abort();
 		inFlight.delete(threadId);
+		epochs.set(threadId, epoch(threadId) + 1);
 		restored.add(threadId);
 		void forgetStored(threadId);
 		if (suggestions.delete(threadId)) publish(threadId);
@@ -339,14 +349,30 @@ export default async function plugin(bb: BbPluginApi) {
 	 * record against the current conversation and shows it only when the
 	 * fingerprint still matches.
 	 */
-	const current = async (threadId: string, signal?: AbortSignal): Promise<Held | null> => {
+	const current = (threadId: string): Promise<Held | null> => {
 		const held = suggestions.get(threadId);
-		if (held || restored.has(threadId)) return held ?? null;
-		restored.add(threadId);
+		if (held || restored.has(threadId)) return Promise.resolve(held ?? null);
+		let pending = restoring.get(threadId);
+		if (!pending) {
+			pending = restore(threadId).finally(() => restoring.delete(threadId));
+			restoring.set(threadId, pending);
+		}
+		return pending;
+	};
+
+	/** A failed check is not marked done, so the next read tries again. */
+	const restore = async (threadId: string): Promise<Held | null> => {
+		const start = epoch(threadId);
 		const stored = await readStored(threadId);
-		if (stored?.status !== "ready" || !stored.text) return null;
-		const thread = await bb.sdk.threads.get({ threadId, signal });
-		const prompt = thread.status === "idle" ? await readPrompt(threadId, signal) : undefined;
+		if (stored?.status !== "ready" || !stored.text) {
+			restored.add(threadId);
+			return null;
+		}
+		const thread = await bb.sdk.threads.get({ threadId });
+		const prompt = thread.status === "idle" ? await readPrompt(threadId) : undefined;
+		// The thread moved on during the check; clear() has dropped the record.
+		if (epoch(threadId) !== start) return suggestions.get(threadId) ?? null;
+		restored.add(threadId);
 		if (!prompt || fingerprint(prompt) !== stored.fingerprint) {
 			await forgetStored(threadId);
 			return null;
@@ -363,9 +389,15 @@ export default async function plugin(bb: BbPluginApi) {
 			record(thread.id, "skipped: queued messages");
 			return;
 		}
-		// The parent runs again when its children report back; suggest then.
-		const children = await bb.sdk.threads.count({ parentThreadId: thread.id, status: "active" }).catch(() => ({ total: 0 }));
-		if (children.total > 0) {
+		// A parent with children at work usually runs again when they report back.
+		const start = epoch(thread.id);
+		const counts = await Promise.all(
+			CHILD_WORKING_STATUSES.map((status) =>
+				bb.sdk.threads.count({ parentThreadId: thread.id, status }).catch(() => ({ total: 0 })),
+			),
+		);
+		if (epoch(thread.id) !== start) return;
+		if (counts.some((count) => count.total > 0)) {
 			record(thread.id, "skipped: child threads running");
 			return;
 		}
@@ -432,7 +464,7 @@ export default async function plugin(bb: BbPluginApi) {
 					return { exitCode: 0, stdout: usage };
 				case "show": {
 					if (!threadId) return needThread;
-					const held = await current(threadId, context.signal);
+					const held = await current(threadId);
 					const suggestion = held ? toSuggestion(held) : null;
 					if (json) return { exitCode: 0, stdout: JSON.stringify(suggestion) };
 					return suggestion

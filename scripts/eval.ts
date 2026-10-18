@@ -6,6 +6,7 @@
 //
 //   node scripts/eval.ts [--baseline <rev>] [--model <id>] [--reasoning <level>]
 //                        [--repeats <n>] [--cases <file>] [--output <file>]
+//                        [--concurrency <n>]
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

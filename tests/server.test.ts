@@ -10,14 +10,28 @@ const conversation = (reply: string) => [
 ];
 
 let rows: unknown[];
-let activeChildren: number;
+let children: Partial<Record<string, number>>;
 let replies: string[];
 let requests: number;
+/** When set, timeline and count calls wait for it, so a test can act mid-request. */
+let gate: Promise<void> | null;
 const realFetch = globalThis.fetch;
+
+function hold(): () => void {
+	let release!: () => void;
+	gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	return () => {
+		gate = null;
+		release();
+	};
+}
 
 beforeEach(() => {
 	rows = conversation("Fixed it. Should I run the tests?");
-	activeChildren = 0;
+	children = {};
+	gate = null;
 	replies = [];
 	requests = 0;
 	globalThis.fetch = (async () => {
@@ -36,8 +50,14 @@ function host(): FakePluginHost {
 		settings: { apiFormat: "anthropic", apiModel: "test-model" },
 		sdk: {
 			threads: {
-				timeline: async () => ({ rows, timelinePage: { hasOlderRows: false, olderCursor: null } }),
-				count: async (args) => ({ total: args?.parentThreadId === T && args.status === "active" ? activeChildren : 0 }),
+				timeline: async () => {
+					await gate;
+					return { rows, timelinePage: { hasOlderRows: false, olderCursor: null } };
+				},
+				count: async (args) => {
+					await gate;
+					return { total: args?.parentThreadId === T && args.status ? (children[args.status] ?? 0) : 0 };
+				},
 				get: async () => makeThreadResponse({ id: T, status: "idle" }),
 			},
 		},
@@ -75,14 +95,71 @@ async function lastOutcome(current: FakePluginHost): Promise<string | undefined>
 test("skips a parent whose child threads are still running", async () => {
 	const current = host();
 	await plugin(current.bb);
-	activeChildren = 2;
-	await idle(current);
+	for (const status of ["active", "starting", "pending"]) {
+		children = { [status]: 1 };
+		await idle(current);
+		assert.equal(await lastOutcome(current), "skipped: child threads running", status);
+	}
 	assert.equal(requests, 0);
-	assert.equal(await lastOutcome(current), "skipped: child threads running");
-	activeChildren = 0;
+	children = { idle: 3, error: 1 };
 	replies.push('{"suggestion": "run the tests"}');
 	await idle(current);
 	assert.equal(await shown(current), "run the tests");
+});
+
+test("a turn that starts while children are counted makes no request", async () => {
+	const current = host();
+	await plugin(current.bb);
+	const release = hold();
+	const event = current.harness.emitThreadEvent("thread.idle", {
+		thread: makeThreadResponse({ id: T, status: "idle", queuedMessageCount: 0 }),
+		lastAssistantText: null,
+	});
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await current.harness.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: T, status: "active" }) });
+	release();
+	await event;
+	await settle(current);
+	assert.equal(requests, 0);
+});
+
+test("two clients asking at once after a reload both get the suggestion", async () => {
+	const first = host();
+	await plugin(first.bb);
+	replies.push('{"suggestion": "run the tests"}');
+	await idle(first);
+	const second = await first.harness.reload(plugin);
+	const [a, b] = await Promise.all([shown(second), shown(second)]);
+	assert.deepEqual([a, b], ["run the tests", "run the tests"]);
+});
+
+test("a turn that starts during the restore check gets no stale suggestion", async () => {
+	const first = host();
+	await plugin(first.bb);
+	replies.push('{"suggestion": "run the tests"}');
+	await idle(first);
+	const second = await first.harness.reload(plugin);
+	const release = hold();
+	const pending = shown(second);
+	await new Promise((resolve) => setTimeout(resolve, 5));
+	await second.harness.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: T, status: "active" }) });
+	release();
+	assert.equal(await pending, null);
+	assert.equal(await shown(second), null);
+});
+
+test("a restore that fails is tried again", async () => {
+	const first = host();
+	await plugin(first.bb);
+	replies.push('{"suggestion": "run the tests"}');
+	await idle(first);
+	const second = await first.harness.reload(plugin);
+	second.harness.sdk.stub("threads.get", async () => {
+		throw new Error("server busy");
+	});
+	await assert.rejects(shown(second));
+	second.harness.sdk.stub("threads.get", async () => makeThreadResponse({ id: T, status: "idle" }));
+	assert.equal(await shown(second), "run the tests");
 });
 
 test("a suggestion survives a reload without a new request", async () => {

@@ -40,9 +40,9 @@ request with:
 
 Tool calls, commands and their output are never sent. Hidden threads, child
 threads (their parent agent writes the next message), threads with queued
-messages, threads whose last turn failed, and parents whose child threads are
-still running (they run again when the children report back) get no
-suggestion; `bb next-prompt suggest` still works on any idle thread.
+messages, threads whose last turn failed, and parents with child threads that
+are queued, starting or running (a parent usually runs again when its children
+report back, and gets a suggestion then) get no suggestion; `bb next-prompt suggest` still works on any idle thread.
 
 The prompt asks the model to tell what the assistant already did, is doing or
 promised from what is still the user's to decide, and to answer
@@ -173,7 +173,8 @@ suggestion model through `claude -p` and scores each reply: silence where the
 user should be left alone, a matching suggestion where one next step is
 grounded. `--baseline <rev>` runs that revision's prompt on the same cases, so
 a prompt change is compared with the one it replaces; `--model`,
-`--reasoning`, `--repeats` and `--output <file>` are optional. Each request
+`--reasoning`, `--repeats`, `--concurrency` (4 requests at once by default)
+and `--output <file>` are optional. Each request
 bills like a real suggestion.
 
 ## License
