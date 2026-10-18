@@ -8,20 +8,26 @@ the composer:
 ↳ next: run the focused tests  Tab ↹
 ```
 
-Click the line, or press **Tab** or **→** in the empty composer, to put the text
-in the draft. It is not sent: you edit or send it yourself. Typing hides the
-line, and clearing the draft back to empty brings it back after 1.5 seconds,
-without a new model request. Hover the line and click **×** to dismiss it.
+or, with the `display` setting set to `ghost`, as grey text inside the empty
+composer, where bb's placeholder usually is.
+
+Click the line, press **Tab** or **→** in the empty composer, or swipe right in
+it on a touch screen, to put the text in the draft. It is not sent: you edit or
+send it yourself. Typing hides the suggestion, and clearing the draft back to
+empty brings it back after 1.5 seconds, without a new model request. To
+dismiss it, hover the line and click **×**, or press **Esc** on the grey text.
 
 Suggestions are display-only. The plugin writes nothing into the thread or the
 agent's context, and a new turn, a failure, archiving or deleting the thread
-discards the current suggestion.
+discards the current suggestion. Until then it survives a plugin reload or a bb
+restart, and so does a dismissal: an unchanged conversation gets neither a new
+request nor the dismissed suggestion back.
 
 It is the bb counterpart of the next-prompt extensions for
 [pi](https://github.com/CrazyCoder/next-prompt-extension) and
 [Oh My Pi](https://github.com/CrazyCoder/omp-next-prompt-extension). Its
-system prompt and output filter are the Oh My Pi extension's, with the prompt
-also asking to match the user's language.
+system prompt started from the Oh My Pi extension's and adds rules for staying
+silent, listed below.
 
 ## When a suggestion is made
 
@@ -34,11 +40,24 @@ request with:
 
 Tool calls, commands and their output are never sent. Hidden threads, child
 threads (their parent agent writes the next message), threads with queued
-messages, and threads whose last turn failed get no suggestion; `bb next-prompt
-suggest` still works on any idle thread. The
-reply is dropped unless it is a 2–12 word instruction under 100 characters in
-the user's voice; "Let me…", "looks good", questions, and multi-sentence replies
+messages, threads whose last turn failed, and parents whose child threads are
+still running (they run again when the children report back) get no
+suggestion; `bb next-prompt suggest` still works on any idle thread.
+
+The prompt asks the model to tell what the assistant already did, is doing or
+promised from what is still the user's to decide, and to answer
+`{"suggestion": null}` when the user can just wait, the task is finished, the
+only reply would be an acknowledgment, the options left have no stated
+preference, or the assistant asks for a fact only the user knows. It never
+offers to push, deploy or publish unless the user asked for it. A reply is
+dropped unless it is a 2–12 word instruction under 100 characters in the
+user's voice; "Let me…", "looks good", questions, and multi-sentence replies
 are filtered out.
+
+Each thread's last result, the suggestion, a dismissal or the model's
+silence, is stored with a fingerprint of the prompt, the model route and the
+transcript. A matching fingerprint answers the next idle event without a
+request; any change makes a new one.
 
 ## Model
 
@@ -87,6 +106,7 @@ picker above it, not here.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Suggest automatically after each turn. `bb next-prompt suggest` works either way. |
+| `display` | `banner` | `banner`: a line above the composer. `ghost`: grey text inside the empty composer, dismissed with Esc. Applies at once. |
 | `apiFormat` | `off` | `anthropic` or `openai` sends every request to the HTTP API below instead of the picked model. |
 | `apiBaseUrl` | empty | Empty means `https://api.anthropic.com` for `anthropic`; required for `openai`. |
 | `apiModel` | empty | Model for the HTTP API. |
@@ -111,19 +131,22 @@ for example, `bb next-prompt model codex/gpt-6-luna@low`; the reasoning level
 defaults to `low`. `reset` returns to the default.
 
 Inside a bb thread the thread id defaults to the current thread.
-`status` lists why recent requests showed nothing: `filtered`, `timed out`,
-`cancelled` (the thread moved on first), `skipped: queued messages`, or `failed`
-with the error.
+`status` lists why recent requests showed nothing: `filtered` (including the
+model's `null`), `timed out`, `cancelled` (the thread moved on first),
+`skipped: queued messages`, `skipped: child threads running`, `unchanged:
+dismissed earlier` or `unchanged: silent earlier` (the stored result for the
+same conversation), or `failed` with the error. `suggest` ignores the stored
+result and always asks the model.
 
 ## Install
 
 Requires bb 0.45 or later.
 
 ```sh
-bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@^0.2.0
+bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@^0.3.0
 ```
 
-bb installs the newest `0.2.x` release, and `bb plugin update next-prompt`
+bb installs the newest `0.3.x` release, and `bb plugin update next-prompt`
 moves to newer releases in that range. The first suggestion appears after the
 next turn that finishes in a visible thread.
 
@@ -142,7 +165,16 @@ After editing the source, run `bb plugin build && bb plugin reload next-prompt`.
 ```sh
 npm test            # node --test tests/*.test.ts
 npm run typecheck
+npm run eval -- --baseline HEAD --repeats 2
 ```
+
+`npm run eval` sends the labelled conversations in `eval/cases.json` to the
+suggestion model through `claude -p` and scores each reply: silence where the
+user should be left alone, a matching suggestion where one next step is
+grounded. `--baseline <rev>` runs that revision's prompt on the same cases, so
+a prompt change is compared with the one it replaces; `--model`,
+`--reasoning`, `--repeats` and `--output <file>` are optional. Each request
+bills like a real suggestion.
 
 ## License
 

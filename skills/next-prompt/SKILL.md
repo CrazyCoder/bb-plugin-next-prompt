@@ -5,8 +5,9 @@ description: Show, generate, or debug the Next Prompt plugin's suggestions for a
 
 # Next Prompt
 
-The Next Prompt plugin shows one predicted next instruction above a thread's
-composer after each finished turn. The suggestion is display-only. It is never
+The Next Prompt plugin shows one predicted next instruction after each
+finished turn, as a line above a thread's composer or as grey text inside it
+(the `display` setting). The suggestion is display-only. It is never
 part of the agent's reply, and an agent must not imitate it by adding
 prompt-shaped lines to its own messages.
 
@@ -26,8 +27,13 @@ To diagnose a missing suggestion, run `bb next-prompt status` and read the
 outcome for the thread:
 
 - `filtered: "<raw>"`: the model replied, but not with a 2–12 word user-voice
-  instruction. A raw reply such as `(silence)` or an empty one means the model
-  chose silence because no next step was obvious.
+  instruction. A raw `{"suggestion": null}` means the model chose silence:
+  the user can wait, the task is done, or no next step was obvious.
+- `unchanged: dismissed earlier` / `unchanged: silent earlier`: the stored
+  result for the same conversation answered; the user dismissed it, or the
+  model was silent. `suggest` asks again regardless.
+- `skipped: child threads running`: the thread's children are still working;
+  it gets a suggestion after they report back and it finishes again.
 - `timed out`: raise `timeoutSeconds`, or check the route with `bb next-prompt model`.
 - `failed: …`: the error from the CLI, API or worker thread, such as a CLI
   that is not logged in on the bb server, a missing `apiBaseUrl`, or a worker
