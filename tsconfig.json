@@ -19,6 +19,7 @@
   "include": [
     "*.ts",
     "app.tsx",
-    "tests/*.ts"
+    "tests/*.ts",
+    "scripts/*.ts"
   ]
 }
