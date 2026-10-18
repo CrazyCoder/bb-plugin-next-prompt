@@ -73,12 +73,13 @@ async function settle(current: FakePluginHost) {
 	throw new Error("generation did not settle");
 }
 
+// The fake host awaits async handlers, so a generation has started by the time this returns.
 async function idle(current: FakePluginHost) {
-	await current.harness.emitThreadEvent("thread.idle", {
+	const { errors } = await current.harness.emitThreadEvent("thread.idle", {
 		thread: makeThreadResponse({ id: T, status: "idle", queuedMessageCount: 0 }),
 		lastAssistantText: null,
 	});
-	await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.deepEqual(errors, []);
 	await settle(current);
 }
 
