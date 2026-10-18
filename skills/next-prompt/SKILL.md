@@ -32,8 +32,9 @@ outcome for the thread:
 - `unchanged: dismissed earlier` / `unchanged: silent earlier`: the stored
   result for the same conversation answered; the user dismissed it, or the
   model was silent. `suggest` asks again regardless.
-- `skipped: child threads running`: the thread has children queued, starting or running;
-  it gets a suggestion after they report back and it finishes again.
+- `skipped: child threads running`: the thread has children queued, starting
+  or running; it gets a suggestion after they report back and it finishes
+  again.
 - `timed out`: raise `timeoutSeconds`, or check the route with `bb next-prompt model`.
 - `failed: …`: the error from the CLI, API or worker thread, such as a CLI
   that is not logged in on the bb server, a missing `apiBaseUrl`, or a worker

@@ -26,7 +26,7 @@ request nor the dismissed suggestion back.
 It is the bb counterpart of the next-prompt extensions for
 [pi](https://github.com/CrazyCoder/next-prompt-extension) and
 [Oh My Pi](https://github.com/CrazyCoder/omp-next-prompt-extension). Its
-system prompt started from the Oh My Pi extension's and adds rules for staying
+system prompt is based on the Oh My Pi extension's, with rules for staying
 silent, listed below.
 
 ## When a suggestion is made
@@ -42,7 +42,8 @@ Tool calls, commands and their output are never sent. Hidden threads, child
 threads (their parent agent writes the next message), threads with queued
 messages, threads whose last turn failed, and parents with child threads that
 are queued, starting or running (a parent usually runs again when its children
-report back, and gets a suggestion then) get no suggestion; `bb next-prompt suggest` still works on any idle thread.
+report back, and gets a suggestion then) get no suggestion; `bb next-prompt
+suggest` still works on any idle thread.
 
 The prompt asks the model to tell what the assistant already did, is doing or
 promised from what is still the user's to decide, and to answer
@@ -174,8 +175,8 @@ user should be left alone, a matching suggestion where one next step is
 grounded. `--baseline <rev>` runs that revision's prompt on the same cases, so
 a prompt change is compared with the one it replaces; `--model`,
 `--reasoning`, `--repeats`, `--concurrency` (4 requests at once by default)
-and `--output <file>` are optional. Each request
-bills like a real suggestion.
+and `--output <file>` are optional. Each request bills like a real
+suggestion.
 
 ## License
 

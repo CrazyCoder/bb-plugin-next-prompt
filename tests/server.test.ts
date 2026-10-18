@@ -222,6 +222,18 @@ test("a thread that runs again forgets its stored suggestion", async () => {
 	assert.equal(await shown(second), null);
 });
 
+test("loading drops records older than 30 days and keeps recent ones", async () => {
+	const first = host();
+	await plugin(first.bb);
+	const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+	await first.bb.storage.kv.set("suggestion:thr_old", { fingerprint: "x", status: "silent", createdAt: old });
+	await first.bb.storage.kv.set("suggestion:thr_new", { fingerprint: "x", status: "silent", createdAt: new Date().toISOString() });
+	await first.bb.storage.kv.set("suggestion:thr_bad", { status: "unknown" });
+	const second = await first.harness.reload(plugin);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.deepEqual(await second.bb.storage.kv.list("suggestion:"), ["suggestion:thr_new"]);
+});
+
 test("suggest regenerates even when the conversation is unchanged", async () => {
 	const current = host();
 	await plugin(current.bb);
