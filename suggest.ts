@@ -16,27 +16,33 @@ Your job is to predict what THEY would type - not what you think they should do.
 THE TEST: Would they think "I was just about to type that"?
 
 EXAMPLES:
-User asked "fix the bug and run tests", bug is fixed → "run the tests"
-After code written → "try it out"
-The assistant offers options → suggest the one the user would likely pick, based on conversation
-The assistant asks to continue → "yes" or "go ahead"
-Task complete, obvious follow-up → "commit this" or "push it"
-After error or misunderstanding → silence (let them assess/correct)
+User asked "fix the bug and run tests", bug is fixed, tests not run → "run the tests"
+The assistant asks approval for what the user asked for → "yes" or "go ahead"
+The assistant recommends one option, or the user stated a preference → the option they would pick
+The original request has a step left, such as "then commit" → that step: "commit this"
+After error or misunderstanding → null (let them assess/correct)
 
 Be specific: "run the tests" beats "continue".
 
+Before suggesting, separate what the assistant already did, is doing or promised to do from what is still the user's to decide. Return null when:
+- the assistant says work is running, or promises to do it next: the user just waits
+- the task is finished and the user asked for nothing more
+- the only reply would be an acknowledgment, praise or a status question
+- materially different options remain and nothing says which the user prefers
+- the assistant asks for a fact only the user knows
+
 NEVER SUGGEST:
+- Repeating work already done, such as committing what is committed
+- Steps the user did not ask for, such as pushing, deploying or publishing
+- Invented names, values or preferences
 - Evaluative ("looks good", "thanks")
 - Questions ("what about...?")
 - Assistant-voice ("Let me...", "I'll...", "Here's...")
-- New ideas they didn't ask about
 - Multiple sentences
 
-Stay silent if the next step isn't obvious from what the user said.
+Format: 2-12 words, match the user's style and language.
 
-Format: 2-12 words, match the user's style and language. Or nothing.
-
-Reply with ONLY the suggestion, no quotes or explanation.`;
+Reply with ONLY JSON: {"suggestion": "<text>"}, or {"suggestion": null} when the next step isn't obvious from what the user said.`;
 
 type Row = Record<string, unknown>;
 
@@ -140,13 +146,30 @@ export function shouldFilterSuggestion(suggestion: string): boolean {
 	);
 }
 
-/** Strip fences and quotes from raw model output; undefined means "show nothing". */
-export function normalizeSuggestion(output: string): string | undefined {
-	const suggestion = output
+/**
+ * The suggestion text from a `{"suggestion": string | null}` reply. A reply
+ * that is not JSON is taken as the text itself, for models that ignore the
+ * format; one that starts like JSON but does not parse is dropped.
+ */
+function replyText(output: string): string | undefined {
+	const body = output
 		.trim()
-		.replace(/^```(?:text|markdown)?\s*/i, "")
+		.replace(/^```(?:json|text|markdown)?\s*/i, "")
 		.replace(/\s*```$/i, "")
-		.trim()
+		.trim();
+	if (!body.startsWith("{")) return body;
+	try {
+		const parsed = asRow(JSON.parse(body));
+		return typeof parsed?.suggestion === "string" ? parsed.suggestion : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Read and filter raw model output; undefined means "show nothing". */
+export function normalizeSuggestion(output: string): string | undefined {
+	const suggestion = replyText(output)
+		?.trim()
 		.replace(/^(["'`“])([\s\S]+)(["'`”])$/, "$2")
 		.trim();
 	if (!suggestion || shouldFilterSuggestion(suggestion)) return undefined;

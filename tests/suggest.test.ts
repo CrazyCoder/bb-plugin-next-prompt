@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildSuggestionPrompt, normalizeSuggestion } from "../suggest.ts";
+import { SYSTEM_PROMPT, buildSuggestionPrompt, normalizeSuggestion } from "../suggest.ts";
 
 const T = "thr_1";
 const user = (id: string, text: string, threadId = T) => ({ kind: "conversation", role: "user", id, threadId, text });
@@ -69,6 +69,22 @@ test("accepts short imperative suggestions and strips quotes and fences", () => 
 	assert.equal(normalizeSuggestion("```\npush it\n```"), "push it");
 	assert.equal(normalizeSuggestion("yes"), "yes");
 	assert.equal(normalizeSuggestion("/review"), "/review");
+});
+
+test("reads the JSON reply", () => {
+	assert.equal(normalizeSuggestion('{"suggestion": "run the tests"}'), "run the tests");
+	assert.equal(normalizeSuggestion('```json\n{"suggestion": "да, удали"}\n```'), "да, удали");
+	assert.equal(normalizeSuggestion('{"suggestion": null}'), undefined);
+	assert.equal(normalizeSuggestion('{"suggestion": "Let me run the tests"}'), undefined);
+	assert.equal(normalizeSuggestion('{"suggestion": ""}'), undefined);
+	assert.equal(normalizeSuggestion('{"suggestion": 3}'), undefined);
+	assert.equal(normalizeSuggestion('{"suggestion": "run'), undefined);
+	assert.equal(normalizeSuggestion('{"other": "run the tests"}'), undefined);
+});
+
+test("the prompt asks for JSON and suggests no push", () => {
+	assert.match(SYSTEM_PROMPT, /\{"suggestion": null\}/);
+	assert.doesNotMatch(SYSTEM_PROMPT, /push it/i);
 });
 
 test("filters silence, assistant voice, evaluations and long output", () => {
