@@ -1,7 +1,8 @@
 // Next Prompt backend: after a visible thread goes idle, ask a model for the
 // instruction the user is most likely to type next, and hold it for the composer
-// banner in app.tsx. Suggestions are display-only: nothing is written
+// in app.tsx. Suggestions are display-only: nothing is written
 // to the thread or the agent's context.
+import { createHash } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -13,9 +14,9 @@ import {
 	type ApiFormat,
 	type CompletionRequest,
 	type ModelSelection,
-} from "./backends";
-import { SUGGESTION_CHANGED } from "./shared";
-import { SYSTEM_PROMPT, buildSuggestionPrompt, normalizeSuggestion } from "./suggest";
+} from "./backends.ts";
+import { SUGGESTION_CHANGED } from "./shared.ts";
+import { SYSTEM_PROMPT, buildSuggestionPrompt, normalizeSuggestion } from "./suggest.ts";
 
 const suggestionSchema = z.object({
 	threadId: z.string(),
@@ -55,8 +56,26 @@ type SpawnArgs = Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0];
 
 type Outcome = { threadId: string; result: string; at: string };
 
+/**
+ * What the plugin last concluded for a thread's conversation, kept in kv so a
+ * reload or restart neither repeats the request nor brings back a dismissed
+ * suggestion. The fingerprint covers the prompt, the model route and the
+ * transcript; any change to them makes the record stale.
+ */
+const storedSchema = z.object({
+	fingerprint: z.string(),
+	status: z.enum(["ready", "dismissed", "silent"]),
+	text: z.string().optional(),
+	createdAt: z.string(),
+});
+type Stored = z.infer<typeof storedSchema>;
+type Held = Suggestion & { fingerprint: string };
+
 const MAX_TIMELINE_PAGES = 5;
 const MODEL_SELECTION_KEY = "model-selection";
+const STORED_PREFIX = "suggestion:";
+/** Records of threads deleted while the plugin was not loaded are dropped after this. */
+const STORED_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 /** Least to most permissive; a worker gets the first one its provider supports. */
 const WORKER_PERMISSION_MODES = ["accept-edits", "auto", "full"] as const;
 
@@ -184,10 +203,30 @@ export default async function plugin(bb: BbPluginApi) {
 		return completeWithWorker(threadId, active, request);
 	};
 
-	const suggestions = new Map<string, Suggestion>();
+	const suggestions = new Map<string, Held>();
 	const inFlight = new Map<string, AbortController>();
+	/** Threads whose stored record this load has already checked against the conversation. */
+	const restored = new Set<string>();
 	const outcomes: Outcome[] = [];
 	let disposed = false;
+
+	const fingerprint = (prompt: string) =>
+		createHash("sha256").update(SYSTEM_PROMPT).update("\0").update(describeRoute()).update("\0").update(prompt).digest("hex");
+
+	const readStored = async (threadId: string): Promise<Stored | undefined> => {
+		const key = `${STORED_PREFIX}${threadId}`;
+		const raw = await bb.storage.kv.get(key);
+		if (raw === undefined) return undefined;
+		const parsed = storedSchema.safeParse(raw);
+		if (parsed.success) return parsed.data;
+		await bb.storage.kv.delete(key);
+		return undefined;
+	};
+	const writeStored = (threadId: string, record: Omit<Stored, "createdAt">) =>
+		bb.storage.kv.set(`${STORED_PREFIX}${threadId}`, { ...record, createdAt: new Date().toISOString() });
+	const forgetStored = (threadId: string) => bb.storage.kv.delete(`${STORED_PREFIX}${threadId}`).catch(() => {});
+
+	const toSuggestion = (held: Held): Suggestion => ({ threadId: held.threadId, text: held.text, createdAt: held.createdAt });
 
 	const publish = (threadId: string) => {
 		if (disposed) return;
@@ -207,6 +246,8 @@ export default async function plugin(bb: BbPluginApi) {
 	const clear = (threadId: string) => {
 		inFlight.get(threadId)?.abort();
 		inFlight.delete(threadId);
+		restored.add(threadId);
+		void forgetStored(threadId);
 		if (suggestions.delete(threadId)) publish(threadId);
 	};
 
@@ -230,26 +271,46 @@ export default async function plugin(bb: BbPluginApi) {
 		return buildSuggestionPrompt(pages.flat(), threadId, values.maxContextChars);
 	};
 
-	/** Generate and store a suggestion; resolves to the stored text or a reason it was not stored. */
-	const generate = async (threadId: string, outerSignal?: AbortSignal): Promise<{ text?: string; reason: string }> => {
+	/**
+	 * Generate and store a suggestion; resolves to the stored text or a reason
+	 * it was not stored. With `reuse`, a stored record for the same
+	 * conversation answers instead of a new request.
+	 */
+	const generate = async (
+		threadId: string,
+		options: { reuse: boolean; signal?: AbortSignal },
+	): Promise<{ text?: string; reason: string }> => {
 		inFlight.get(threadId)?.abort();
 		const controller = new AbortController();
 		inFlight.set(threadId, controller);
+		const outerSignal = options.signal;
 		const signals = [controller.signal, AbortSignal.timeout(values.timeoutSeconds * 1000)];
 		if (outerSignal) signals.push(outerSignal);
 		const signal = AbortSignal.any(signals);
 		try {
 			const prompt = await readPrompt(threadId, signal);
 			if (!prompt) return { reason: "no completed exchange" };
+			const hash = fingerprint(prompt);
+			restored.add(threadId);
+			const stored = options.reuse ? await readStored(threadId) : undefined;
+			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
+			if (stored?.fingerprint === hash) {
+				if (stored.status !== "ready" || !stored.text) return { reason: `unchanged: ${stored.status} earlier` };
+				suggestions.set(threadId, { threadId, text: stored.text, createdAt: stored.createdAt, fingerprint: hash });
+				publish(threadId);
+				return { text: stored.text, reason: "shown" };
+			}
 			const raw = await complete(threadId, { system: SYSTEM_PROMPT, prompt, signal });
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
 			const text = normalizeSuggestion(raw);
-			if (!text) return { reason: `filtered: ${JSON.stringify(raw.trim().slice(0, 120))}` };
-			suggestions.set(threadId, {
-				threadId,
-				text,
-				createdAt: new Date().toISOString(),
-			});
+			if (!text) {
+				await writeStored(threadId, { fingerprint: hash, status: "silent" });
+				return { reason: `filtered: ${JSON.stringify(raw.trim().slice(0, 120))}` };
+			}
+			const held: Held = { threadId, text, createdAt: new Date().toISOString(), fingerprint: hash };
+			await writeStored(threadId, { fingerprint: hash, status: "ready", text });
+			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
+			suggestions.set(threadId, held);
 			publish(threadId);
 			return { text, reason: "shown" };
 		} catch (error) {
@@ -266,13 +327,42 @@ export default async function plugin(bb: BbPluginApi) {
 	const isTarget = (thread: ThreadEventTarget) =>
 		thread.visibility !== "hidden" && !thread.parentThreadId && thread.originPluginId !== bb.pluginId;
 
-	bb.events.on("thread.idle", ({ thread }) => {
+	/**
+	 * The thread's suggestion. After a reload the first call checks the stored
+	 * record against the current conversation and shows it only when the
+	 * fingerprint still matches.
+	 */
+	const current = async (threadId: string, signal?: AbortSignal): Promise<Held | null> => {
+		const held = suggestions.get(threadId);
+		if (held || restored.has(threadId)) return held ?? null;
+		restored.add(threadId);
+		const stored = await readStored(threadId);
+		if (stored?.status !== "ready" || !stored.text) return null;
+		const thread = await bb.sdk.threads.get({ threadId, signal });
+		const prompt = thread.status === "idle" ? await readPrompt(threadId, signal) : undefined;
+		if (!prompt || fingerprint(prompt) !== stored.fingerprint) {
+			await forgetStored(threadId);
+			return null;
+		}
+		if (suggestions.has(threadId) || inFlight.has(threadId)) return suggestions.get(threadId) ?? null;
+		const restoredHeld: Held = { threadId, text: stored.text, createdAt: stored.createdAt, fingerprint: stored.fingerprint };
+		suggestions.set(threadId, restoredHeld);
+		return restoredHeld;
+	};
+
+	bb.events.on("thread.idle", async ({ thread }) => {
 		if (!values.enabled || !isTarget(thread)) return;
 		if (thread.queuedMessageCount > 0) {
 			record(thread.id, "skipped: queued messages");
 			return;
 		}
-		void generate(thread.id).then(({ text, reason }) => record(thread.id, text ? `shown: ${text}` : reason));
+		// The parent runs again when its children report back; suggest then.
+		const children = await bb.sdk.threads.count({ parentThreadId: thread.id, status: "active" }).catch(() => ({ total: 0 }));
+		if (children.total > 0) {
+			record(thread.id, "skipped: child threads running");
+			return;
+		}
+		void generate(thread.id, { reuse: true }).then(({ text, reason }) => record(thread.id, text ? `shown: ${text}` : reason));
 	});
 	bb.events.on("thread.active", ({ thread }) => clear(thread.id));
 	bb.events.on("thread.failed", ({ thread }) => clear(thread.id));
@@ -286,11 +376,17 @@ export default async function plugin(bb: BbPluginApi) {
 			selection = next;
 			return { selection: next };
 		},
-		suggestion_get: ({ threadId }) => ({ suggestion: suggestions.get(threadId) ?? null }),
-		suggestion_dismiss: ({ threadId }) => {
-			const dismissed = suggestions.delete(threadId);
-			if (dismissed) publish(threadId);
-			return { dismissed };
+		suggestion_get: async ({ threadId }) => {
+			const held = await current(threadId);
+			return { suggestion: held ? toSuggestion(held) : null };
+		},
+		suggestion_dismiss: async ({ threadId }) => {
+			const held = suggestions.get(threadId);
+			if (!held) return { dismissed: false };
+			suggestions.delete(threadId);
+			publish(threadId);
+			await writeStored(threadId, { fingerprint: held.fingerprint, status: "dismissed" });
+			return { dismissed: true };
 		},
 	});
 
@@ -329,7 +425,8 @@ export default async function plugin(bb: BbPluginApi) {
 					return { exitCode: 0, stdout: usage };
 				case "show": {
 					if (!threadId) return needThread;
-					const suggestion = suggestions.get(threadId) ?? null;
+					const held = await current(threadId, context.signal);
+					const suggestion = held ? toSuggestion(held) : null;
 					if (json) return { exitCode: 0, stdout: JSON.stringify(suggestion) };
 					return suggestion
 						? { exitCode: 0, stdout: suggestion.text }
@@ -339,7 +436,7 @@ export default async function plugin(bb: BbPluginApi) {
 					if (!threadId) return needThread;
 					const thread = await bb.sdk.threads.get({ threadId, signal: context.signal });
 					if (thread.status !== "idle") return { exitCode: 1, stderr: `Thread ${threadId} is ${thread.status}; wait until it is idle.` };
-					const result = await generate(threadId, context.signal);
+					const result = await generate(threadId, { reuse: false, signal: context.signal });
 					record(threadId, result.text ? `shown: ${result.text}` : result.reason);
 					if (json) return { exitCode: result.text ? 0 : 1, stdout: JSON.stringify(result) };
 					return result.text
@@ -389,6 +486,16 @@ export default async function plugin(bb: BbPluginApi) {
 			}
 			return { exitCode: 1, stderr: usage };
 		},
+	});
+
+	void (async () => {
+		const cutoff = Date.now() - STORED_MAX_AGE_MS;
+		for (const key of await bb.storage.kv.list(STORED_PREFIX)) {
+			const parsed = storedSchema.safeParse(await bb.storage.kv.get(key));
+			if (!parsed.success || Date.parse(parsed.data.createdAt) < cutoff) await bb.storage.kv.delete(key);
+		}
+	})().catch((error: unknown) => {
+		if (!disposed) bb.log.warn(`pruning stored suggestions failed: ${error instanceof Error ? error.message : String(error)}`);
 	});
 
 	bb.onDispose(() => {
