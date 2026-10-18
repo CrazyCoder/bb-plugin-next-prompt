@@ -1,18 +1,23 @@
-// Next Prompt frontend: a one-line banner above a thread's composer showing
-// the suggestion server.ts generated. Clicking it, or pressing Tab or Right
-// Arrow in the empty composer, puts the text in the draft without sending it.
-import { useCallback, useEffect, useRef, useState } from "react";
+// Next Prompt frontend: shows the suggestion server.ts generated, as a
+// one-line banner above a thread's composer or as grey text inside the empty
+// editor (the `display` setting). Clicking the banner, pressing Tab or Right
+// Arrow in the empty composer, or swiping right in it puts the text in the
+// draft without sending it.
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import {
 	definePluginApp,
 	experimental_ProviderModelPicker as ProviderModelPicker,
 	useComposer,
 	useRealtime,
 	useRpc,
+	useSettings,
 	type ExperimentalProviderModelPickerValue,
 	type PluginComposerApi,
 } from "@get-bb/plugin-sdk/app";
-import { SUGGESTION_CHANGED } from "./shared";
-import type { Suggestion, rpcContract } from "./server";
+import { paintGhost } from "./ghost.ts";
+import { SUGGESTION_CHANGED } from "./shared.ts";
+import { SwipeTracker } from "./swipe.ts";
+import type { Suggestion, rpcContract } from "./server.ts";
 
 /** Delay before a suggestion reappears after the draft is cleared back to empty. */
 const REARM_DELAY_MS = 1_500;
@@ -71,10 +76,49 @@ function findEditor(banner: HTMLElement): HTMLElement | null {
 	return null;
 }
 
+/** Accept on a right swipe that starts in the editor. */
+function useSwipeToAccept(rootRef: RefObject<HTMLElement | null>, active: boolean, accept: () => void) {
+	useEffect(() => {
+		const root = rootRef.current;
+		const editor = active && root ? findEditor(root) : null;
+		if (!editor) return;
+		const tracker = new SwipeTracker();
+		const onStart = (event: TouchEvent) => {
+			const touch = event.touches[0];
+			if (event.touches.length !== 1 || !touch) return tracker.cancel();
+			tracker.start(touch.clientX, touch.clientY, event.timeStamp, window.innerWidth);
+		};
+		const onMove = (event: TouchEvent) => {
+			const touch = event.touches[0];
+			if (event.touches.length !== 1 || !touch) return tracker.cancel();
+			if (tracker.move(touch.clientX, touch.clientY, event.timeStamp) && event.cancelable) event.preventDefault();
+		};
+		const onEnd = (event: TouchEvent) => {
+			const touch = event.changedTouches[0];
+			if (event.touches.length !== 0 || !touch) return tracker.cancel();
+			if (!tracker.end(touch.clientX, touch.clientY, event.timeStamp)) return;
+			if (event.cancelable) event.preventDefault();
+			accept();
+		};
+		const onCancel = () => tracker.cancel();
+		editor.addEventListener("touchstart", onStart, { capture: true, passive: true });
+		editor.addEventListener("touchmove", onMove, { capture: true, passive: false });
+		editor.addEventListener("touchend", onEnd, { capture: true, passive: false });
+		editor.addEventListener("touchcancel", onCancel, true);
+		return () => {
+			editor.removeEventListener("touchstart", onStart, true);
+			editor.removeEventListener("touchmove", onMove, true);
+			editor.removeEventListener("touchend", onEnd, true);
+			editor.removeEventListener("touchcancel", onCancel, true);
+		};
+	}, [rootRef, active, accept]);
+}
+
 function SuggestionBanner({ threadId, composer }: { threadId: string; composer: PluginComposerApi }) {
 	const { suggestion, dismiss } = useSuggestion(threadId);
+	const ghost = useSettings().values?.display === "ghost";
 	const armed = useArmed(composer.isEmpty);
-	const rootRef = useRef<HTMLDivElement>(null);
+	const rootRef = useRef<HTMLElement>(null);
 	const visible = suggestion !== null && armed && composer.isEmpty && !composer.isRunning;
 
 	const accept = useCallback(() => {
@@ -86,22 +130,43 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 	useEffect(() => {
 		if (!visible) return;
 		const onKeyDown = (event: KeyboardEvent) => {
-			if (event.key !== "Tab" && event.key !== "ArrowRight") return;
+			const accepting = event.key === "Tab" || event.key === "ArrowRight";
+			// The banner has its own × button; grey text has nothing to click, so Escape hides it.
+			if (!accepting && !(ghost && event.key === "Escape")) return;
 			if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
 			const root = rootRef.current;
 			const editor = root ? findEditor(root) : null;
 			if (!editor || !(event.target instanceof Node) || !editor.contains(event.target)) return;
+			if (!accepting) return dismiss();
 			event.preventDefault();
 			event.stopPropagation();
 			accept();
 		};
 		document.addEventListener("keydown", onKeyDown, true);
 		return () => document.removeEventListener("keydown", onKeyDown, true);
-	}, [visible, accept]);
+	}, [visible, ghost, accept, dismiss]);
 
+	useSwipeToAccept(rootRef, visible, accept);
+
+	const text = visible ? suggestion.text : null;
+	const lines = composer.layout === "compact" ? 1 : 3;
+	useEffect(() => {
+		const root = rootRef.current;
+		const editor = ghost && text !== null && root ? findEditor(root) : null;
+		return editor && text !== null ? paintGhost(editor, text, lines) : undefined;
+	}, [ghost, text, lines]);
+
+	if (ghost) {
+		// Anchor for findEditor, and the suggestion read out to screen readers.
+		return (
+			<span ref={rootRef} className="sr-only" role="status" aria-live="polite">
+				{text === null ? "" : `Suggested next prompt: ${text}. Press Tab to insert it.`}
+			</span>
+		);
+	}
 	if (!visible) return null;
 	return (
-		<div ref={rootRef} className="group flex min-w-0 items-center gap-2 px-3 py-1 text-xs text-muted-foreground">
+		<div ref={rootRef as RefObject<HTMLDivElement>} className="group flex min-w-0 items-center gap-2 px-3 py-1 text-xs text-muted-foreground">
 			<button
 				type="button"
 				className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"

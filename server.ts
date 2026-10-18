@@ -93,6 +93,13 @@ export default async function plugin(bb: BbPluginApi) {
 			description: "After each finished turn in a visible thread, generate one suggestion.",
 			default: true,
 		},
+		display: {
+			type: "select",
+			label: "Show the suggestion as",
+			description: "banner: a line above the composer. ghost: grey text inside the empty composer.",
+			options: ["banner", "ghost"],
+			default: "banner",
+		},
 		apiFormat: {
 			type: "select",
 			label: "HTTP API override",
