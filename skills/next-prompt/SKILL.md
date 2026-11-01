@@ -5,14 +5,14 @@ description: Show, generate, or debug the Next Prompt plugin's suggestions for a
 
 # Next Prompt
 
-The Next Prompt plugin shows one predicted next instruction after each
-finished turn, as a line above a thread's composer or as grey text inside it
-(the `display` setting). The suggestion is display-only. It is never
-part of the agent's reply, and an agent must not imitate it by adding
-prompt-shaped lines to its own messages.
+The Next Prompt plugin shows up to three predicted next instructions after each
+finished turn, as numbered cards above a thread's composer, the best one as grey
+text inside it, or both (the `display` setting). Suggestions are display-only.
+They are never part of the agent's reply, and an agent must not imitate them by
+adding prompt-shaped lines to its own messages.
 
 ```sh
-bb next-prompt show [thread-id] [--json]      # current suggestion, exit 1 when none
+bb next-prompt show [thread-id] [--json]      # current suggestions, exit 1 when none
 bb next-prompt suggest [thread-id] [--json]   # generate now; the thread must be idle
 bb next-prompt context [thread-id]            # the transcript a request sends
 bb next-prompt status [--json]                # model route, last 10 outcomes
@@ -26,9 +26,12 @@ thread.
 To diagnose a missing suggestion, run `bb next-prompt status` and read the
 outcome for the thread:
 
-- `filtered: "<raw>"`: the model replied, but not with a 2–12 word user-voice
-  instruction. A raw `{"suggestion": null}` means the model chose silence:
-  the user can wait, the task is done, or no next step was obvious.
+- `none: the model had nothing to suggest`: the model chose silence: the user
+  can wait, the task is done, or no next step was obvious.
+- `filtered: "<raw>"`: the reply failed the checks: it is not JSON, or no
+  suggestion is a single line under 100 characters.
+- `skipped: short answer`: the answer is under 20 characters. `suggest` asks
+  regardless.
 - `unchanged: dismissed earlier` / `unchanged: silent earlier`: the stored
   result for the same conversation answered; the user dismissed it, or the
   model was silent. `suggest` asks again regardless.

@@ -1,9 +1,9 @@
-// Next Prompt frontend: shows the suggestion server.ts generated, as a
-// one-line banner above a thread's composer or as grey text inside the empty
-// editor (the `display` setting). Clicking the banner, pressing Tab or Right
-// Arrow in the empty composer, or swiping right in it puts the text in the
-// draft without sending it.
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+// Next Prompt frontend: shows the suggestions server.ts generated, as numbered
+// cards above a thread's composer, as grey text inside the empty editor, or
+// both (the `display` setting). Pressing Tab or Right Arrow in the empty
+// composer, or swiping right in it, puts the best one in the draft without
+// sending it; a card does the same, or sends with `cardClick` set to send.
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
 	definePluginApp,
 	experimental_ProviderModelPicker as ProviderModelPicker,
@@ -14,6 +14,7 @@ import {
 	type ExperimentalProviderModelPickerValue,
 	type PluginComposerApi,
 } from "@get-bb/plugin-sdk/app";
+import { CARD_GAP_PX, fitCount } from "./cards.ts";
 import { paintGhost } from "./ghost.ts";
 import { SUGGESTION_CHANGED } from "./shared.ts";
 import { SwipeTracker } from "./swipe.ts";
@@ -21,6 +22,13 @@ import type { Suggestion, rpcContract } from "./server.ts";
 
 /** Delay before a suggestion reappears after the draft is cleared back to empty. */
 const REARM_DELAY_MS = 1_500;
+const EXPANDED_KEY = "next-prompt:cards-expanded";
+/** The cards row's padding and dismiss button. */
+const ROW_CHROME_PX = 52;
+const EMPTY_DRAFT = { text: "", mentions: [] };
+
+/** The suggestion each thread last prefilled, so clearing the draft does not bring it back. */
+const prefilledFor = new Map<string, string>();
 
 function useSuggestion(threadId: string) {
 	const rpc = useRpc<typeof rpcContract>();
@@ -117,24 +125,176 @@ function useSwipeToAccept(rootRef: RefObject<HTMLElement | null>, active: boolea
 	}, [rootRef, active]);
 }
 
-function SuggestionBanner({ threadId, composer }: { threadId: string; composer: PluginComposerApi }) {
+/** Whether the list shows every suggestion; remembered across sessions on this browser. */
+function useExpanded(): [boolean, () => void] {
+	const [expanded, setExpanded] = useState(() => {
+		try {
+			return localStorage.getItem(EXPANDED_KEY) === "true";
+		} catch {
+			return false;
+		}
+	});
+	const toggle = useCallback(() => {
+		setExpanded((current) => {
+			try {
+				localStorage.setItem(EXPANDED_KEY, String(!current));
+			} catch {
+				// Private browsing can refuse storage; the toggle still works for this page.
+			}
+			return !current;
+		});
+	}, []);
+	return [expanded, toggle];
+}
+
+function CardLabel({ index, text, hint }: { index: number; text: string; hint: boolean }) {
+	return (
+		<>
+			<span className="shrink-0 opacity-70">{index + 1}.</span>
+			<span className="min-w-0 break-words">{text}</span>
+			{hint ? <span className="shrink-0 opacity-60">Tab ↹</span> : null}
+		</>
+	);
+}
+
+function SuggestionCards({
+	rootRef,
+	texts,
+	hint,
+	title,
+	onPick,
+	onDismiss,
+}: {
+	rootRef: RefObject<HTMLElement | null>;
+	texts: readonly string[];
+	hint: boolean;
+	title: string;
+	onPick: (text: string) => void;
+	onDismiss: () => void;
+}) {
+	const [expanded, toggleExpanded] = useExpanded();
+	const [fit, setFit] = useState(1);
+	const measureRef = useRef<HTMLDivElement>(null);
+
+	useLayoutEffect(() => {
+		const root = rootRef.current;
+		const measure = measureRef.current;
+		if (!root || !measure) return;
+		const update = () => {
+			const widths = Array.from(measure.children, (card) => (card as HTMLElement).offsetWidth);
+			setFit(fitCount(widths, root.clientWidth - ROW_CHROME_PX));
+		};
+		update();
+		const observer = new ResizeObserver(update);
+		observer.observe(root);
+		return () => observer.disconnect();
+	}, [rootRef, texts, hint]);
+
+	const shown = expanded ? texts : texts.slice(0, fit);
+	return (
+		<div ref={rootRef as RefObject<HTMLDivElement>} className="relative flex min-w-0 items-start gap-2 px-3 py-1 text-xs">
+			{/* Unclipped copies of the cards, so a card hidden from the row can still be measured. */}
+			<div aria-hidden className="invisible absolute left-0 top-0 h-0 w-0 overflow-hidden">
+				<div ref={measureRef} className="flex w-max whitespace-nowrap">
+					{texts.map((text, index) => (
+						<span key={text} className="inline-flex items-baseline gap-1 border px-2 py-0.5">
+							<CardLabel index={index} text={text} hint={hint && index === 0} />
+						</span>
+					))}
+				</div>
+			</div>
+			<div className="flex min-w-0 flex-1 flex-wrap" style={{ gap: CARD_GAP_PX }}>
+				{shown.map((text, index) => (
+					<button
+						key={text}
+						type="button"
+						className={`inline-flex min-w-0 max-w-full items-baseline gap-1 rounded-md border px-2 py-0.5 text-left ${
+							index === 0
+								? "border-primary bg-primary text-primary-foreground hover:opacity-90"
+								: "border-border text-muted-foreground hover:text-foreground"
+						}`}
+						onClick={() => onPick(text)}
+						title={title}
+					>
+						<CardLabel index={index} text={text} hint={hint && index === 0} />
+					</button>
+				))}
+			</div>
+			{fit < texts.length ? (
+				<button
+					type="button"
+					className="shrink-0 text-muted-foreground hover:text-foreground"
+					onClick={toggleExpanded}
+					aria-expanded={expanded}
+					aria-label={expanded ? "Show fewer suggestions" : "Show all suggestions"}
+				>
+					{expanded ? "▴" : "▾"}
+				</button>
+			) : null}
+			<button
+				type="button"
+				className="shrink-0 text-muted-foreground hover:text-foreground"
+				onClick={onDismiss}
+				aria-label="Dismiss suggestions"
+			>
+				×
+			</button>
+		</div>
+	);
+}
+
+function Suggestions({ threadId, composer }: { threadId: string; composer: PluginComposerApi }) {
 	const { suggestion, dismiss } = useSuggestion(threadId);
-	const ghost = useSettings().values?.display === "ghost";
+	const settings = useSettings().values;
+	const cards = settings?.display !== "ghost";
+	const ghost = settings?.display === "ghost" || settings?.display === "both";
+	const prefill = settings?.display === "both" && settings?.prefillBest === true;
+	const clickSends = settings?.cardClick === "send";
 	const armed = useArmed(composer.isEmpty);
 	const rootRef = useRef<HTMLElement>(null);
-	const visible = suggestion !== null && armed && composer.isEmpty && !composer.isRunning;
+	const best = suggestion?.texts[0] ?? null;
+	const available = suggestion !== null && !composer.isRunning;
+	/** The empty composer offers the best suggestion: grey text, Tab, → and swipe act on it. */
+	const offered = available && armed && composer.isEmpty;
+	/** The draft holds the unedited best suggestion, so the cards stay to pick another. */
+	const prefilled = available && prefill && composer.text.trim() === best;
+
+	const lastPrefill = useRef<string | null>(null);
+	useEffect(() => {
+		if (!prefill || !offered || best === null || prefilledFor.get(threadId) === suggestion.createdAt) return;
+		prefilledFor.set(threadId, suggestion.createdAt);
+		lastPrefill.current = best;
+		composer.insert(best, { at: "end" });
+	}, [prefill, offered, best, suggestion, threadId, composer]);
+
+	// Dismissed or outdated, the prefilled text goes too, unless the user edited it.
+	useEffect(() => {
+		if (suggestion !== null || lastPrefill.current === null) return;
+		if (composer.text.trim() === lastPrefill.current) composer.replace(EMPTY_DRAFT);
+		lastPrefill.current = null;
+	}, [suggestion, composer]);
 
 	const accept = useCallback(() => {
-		if (!suggestion) return;
-		composer.insert(suggestion.texts[0], { at: "end" });
+		if (best === null) return;
+		composer.insert(best, { at: "end" });
 		composer.focus();
-	}, [composer, suggestion]);
+	}, [composer, best]);
+
+	const pick = useCallback(
+		(text: string) => {
+			if (composer.isEmpty) composer.insert(text, { at: "end" });
+			else composer.replace({ text, mentions: [] });
+			if (clickSends) void composer.submit({ experimental_data: null }).catch(() => composer.focus());
+			else composer.focus();
+		},
+		[composer, clickSends],
+	);
 
 	useEffect(() => {
-		if (!visible) return;
+		if (!offered) return;
 		const onKeyDown = (event: KeyboardEvent) => {
 			const accepting = event.key === "Tab" || event.key === "ArrowRight";
-			// The banner has its own × button; grey text has nothing to click, so Escape hides it.
+			// Cards have their own × button; grey text has nothing to click, so Escape hides it.
 			if (!accepting && !(ghost && event.key === "Escape")) return;
 			if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
 			const root = rootRef.current;
@@ -147,11 +307,13 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 		};
 		document.addEventListener("keydown", onKeyDown, true);
 		return () => document.removeEventListener("keydown", onKeyDown, true);
-	}, [visible, ghost, accept, dismiss]);
+	}, [offered, ghost, accept, dismiss]);
 
-	useSwipeToAccept(rootRef, visible, accept);
+	useSwipeToAccept(rootRef, offered, accept);
 
-	const text = visible ? suggestion.texts[0] : null;
+	// The moment before the prefill lands draws no grey text; after the user clears the draft it does.
+	const prefillPending = prefill && suggestion !== null && prefilledFor.get(threadId) !== suggestion.createdAt;
+	const text = offered && !prefillPending ? best : null;
 	const lines = composer.layout === "compact" ? 1 : 3;
 	useEffect(() => {
 		const root = rootRef.current;
@@ -159,37 +321,24 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 		return editor && text !== null ? paintGhost(editor, text, lines) : undefined;
 	}, [ghost, text, lines]);
 
-	if (ghost) {
-		// Anchor for findEditor, and the suggestion read out to screen readers.
+	if (cards && suggestion !== null && (offered || prefilled)) {
 		return (
-			<span ref={rootRef} className="sr-only" role="status" aria-live="polite">
-				{text === null ? "" : `Suggested next prompt: ${text}. Press Tab to insert it.`}
-			</span>
+			<SuggestionCards
+				rootRef={rootRef}
+				texts={suggestion.texts}
+				hint={offered}
+				title={clickSends ? "Send this prompt" : "Insert into the composer"}
+				onPick={pick}
+				onDismiss={dismiss}
+			/>
 		);
 	}
-	if (!visible) return null;
+	if (cards) return null;
+	// Anchor for findEditor, and the suggestion read out to screen readers.
 	return (
-		<div ref={rootRef as RefObject<HTMLDivElement>} className="group flex min-w-0 items-center gap-2 px-3 py-1 text-xs text-muted-foreground">
-			<button
-				type="button"
-				className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-foreground"
-				onClick={accept}
-				title="Insert into the composer (Tab or →)"
-			>
-				<span aria-hidden>↳</span>
-				<span className="shrink-0">next:</span>
-				<span className="truncate italic">{suggestion.texts[0]}</span>
-				<span className="shrink-0 opacity-60">Tab ↹</span>
-			</button>
-			<button
-				type="button"
-				className="shrink-0 opacity-0 hover:text-foreground focus-visible:opacity-100 group-hover:opacity-60"
-				onClick={dismiss}
-				aria-label="Dismiss suggestion"
-			>
-				×
-			</button>
-		</div>
+		<span ref={rootRef} className="sr-only" role="status" aria-live="polite">
+			{text === null ? "" : `Suggested next prompt: ${text}. Press Tab to insert it.`}
+		</span>
 	);
 }
 
@@ -197,7 +346,7 @@ function NextPromptBanner() {
 	const composer = useComposer();
 	const { scope } = composer;
 	if (scope.kind !== "thread") return null;
-	return <SuggestionBanner threadId={scope.threadId} composer={composer} />;
+	return <Suggestions key={scope.threadId} threadId={scope.threadId} composer={composer} />;
 }
 
 type PickerSelection = { selection: ExperimentalProviderModelPickerValue; configured: boolean };

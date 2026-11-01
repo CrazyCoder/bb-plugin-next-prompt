@@ -1,38 +1,48 @@
 # Next Prompt for bb
 
-A [bb](https://getbb.app) plugin that predicts the instruction you are likely to
-type next, after each finished turn in a thread, and shows it in one line above
-the composer:
+A [bb](https://getbb.app) plugin that predicts the instructions you are likely
+to type next, after each finished turn in a thread, and shows up to three of
+them, best first, as numbered cards above the composer:
 
 ```text
-↳ next: run the focused tests  Tab ↹
+[1. run the focused tests  Tab ↹]  [2. show me the diff first]        ×
 ```
 
-or, with the `display` setting set to `ghost`, as grey text inside the empty
-composer, where bb's placeholder usually is.
+With the `display` setting set to `ghost`, the best one appears as grey text
+inside the empty composer, where bb's placeholder usually is; `both` shows the
+cards and the grey text.
 
-Click the line, press **Tab** or **→** in the empty composer, or swipe right in
-it on a touch screen, to put the text in the draft. It is not sent: you edit or
-send it yourself. Typing hides the suggestion, and clearing the draft back to
-empty brings it back after 1.5 seconds, without a new model request. To
-dismiss it, hover the line and click **×**, or press **Esc** on the grey text.
+Click a card to put its text in the draft, or press **Tab** or **→** in the
+empty composer, or swipe right in it on a touch screen, to do that with the best
+one. Nothing is sent: you edit or send the draft yourself. Set `cardClick` to
+`send` to make a click send the card at once; Tab, → and the swipe still only
+insert.
+
+The cards take one row. When some do not fit, **▾** expands the list, and the
+browser remembers that choice. Typing hides the suggestions, and clearing the
+draft back to empty brings them back after 1.5 seconds, without a new model
+request. To dismiss them, click **×**, or press **Esc** on the grey text.
+
+With `display` set to `both` and `prefillBest` on, the best suggestion goes into
+the empty composer as real text instead of grey text. The cards stay until you
+edit the draft, and a click replaces the text with the card's. Dismissing them,
+or a new turn, takes the unedited text out again.
 
 Suggestions are display-only. The plugin writes nothing into the thread or the
 agent's context, and a new turn, a failure, archiving or deleting the thread
-discards the current suggestion. Until then it survives a plugin reload or a bb
-restart, and so does a dismissal: an unchanged conversation gets neither a new
-request nor the dismissed suggestion back.
+discards the current suggestions. Until then they survive a plugin reload or a
+bb restart, and so does a dismissal: an unchanged conversation gets neither a
+new request nor the dismissed suggestions back.
 
-It is the bb counterpart of the next-prompt extensions for
-[pi](https://github.com/CrazyCoder/next-prompt-extension) and
-[Oh My Pi](https://github.com/CrazyCoder/omp-next-prompt-extension). Its
-system prompt is based on the Oh My Pi extension's, with rules for staying
-silent, listed below.
+The prompt, the transcript excerpt and the reply checks come from
+[next-prompt-core](https://github.com/CrazyCoder/next-prompt-core), shared with
+[claude-next-prompt](https://github.com/CrazyCoder/claude-next-prompt). This
+plugin holds the generated copy in `vendor/`.
 
-## When a suggestion is made
+## When suggestions are made
 
-When a visible thread goes idle, the plugin reads its timeline and sends one
-request with:
+When a visible thread goes idle after an answer of 20 characters or more, the
+plugin reads its timeline and sends one request with:
 
 - the first user request, cut to 2,500 characters;
 - the newest user and assistant messages, up to the transcript budget (10,000
@@ -45,17 +55,13 @@ are queued, starting or running (a parent usually runs again when its children
 report back, and gets a suggestion then) get no suggestion; `bb next-prompt
 suggest` still works on any idle thread.
 
-The prompt asks the model to tell what the assistant already did, is doing or
-promised from what is still the user's to decide, and to answer
-`{"suggestion": null}` when the user can just wait, the task is finished, the
-only reply would be an acknowledgment, the options left have no stated
-preference, or the assistant asks for a fact only the user knows. It never
-offers to push, deploy or publish unless the user asked for it. A reply is
-dropped unless it is a 2–12 word instruction under 100 characters in the
-user's voice; "Let me…", "looks good", questions, and multi-sentence replies
-are filtered out.
+What to suggest is the prompt's decision. The model answers with JSON,
+`{"suggestions": [...]}`, best first, and an empty list when the user can just
+wait. The code checks only the form: a reply that is not JSON shows nothing, and
+a suggestion must be a single line under 100 characters and must differ from the
+ones before it. Every backend is asked for this JSON.
 
-Each thread's last result, the suggestion, a dismissal or the model's
+Each thread's last result, the suggestions, a dismissal or the model's
 silence, is stored with a fingerprint of the prompt, the model route and the
 transcript. A matching fingerprint answers the next idle event without a
 request; any change makes a new one.
@@ -91,7 +97,7 @@ CLI startup; the rest are single end-to-end runs:
 | --- | --- | --- |
 | Claude Code, Sonnet 5.5, low (default) | 1.5 s | right answer to yes/no offers ("yes, delete them too"), silent on threads with no obvious next step; about 5× Haiku's usage per request |
 | Claude Code, Sonnet 5.5, `--effort low` with thinking on | 1.5 s | same answers as thinking off: Sonnet did not think on these prompts |
-| Claude Code, Haiku 4.5, low | 0.8 s | the cheapest option; more replies in the assistant's voice (filtered out) and occasional notes-to-self such as "wait for their reply" |
+| Claude Code, Haiku 4.5, low | 0.8 s | the cheapest option; more replies in the assistant's voice and occasional notes-to-self such as "wait for their reply" |
 | Claude Code, Haiku 4.5, thinking on | 8–20 s | 700–1,800 output tokens for a four-word reply, which is why low reasoning turns thinking off |
 | Codex, `gpt-6-luna`, low | 3–5 s | about 6k tokens; often returns nothing, which shows no suggestion |
 | omp (ACP), `deepseek/deepseek-v4-flash`, low | 6 s end to end | worker thread |
@@ -107,7 +113,9 @@ picker above it, not here.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `true` | Suggest automatically after each turn. `bb next-prompt suggest` works either way. |
-| `display` | `banner` | `banner`: a line above the composer. `ghost`: grey text inside the empty composer, dismissed with Esc. Applies at once. |
+| `display` | `cards` | `cards`: numbered cards above the composer. `ghost`: the best suggestion as grey text inside the empty composer, dismissed with Esc. `both`: cards and grey text. Applies at once. |
+| `cardClick` | `insert` | `insert` puts a clicked card's text in the draft. `send` sends it at once. |
+| `prefillBest` | `false` | With `display` set to `both`, puts the best suggestion in the empty composer as real text. Nothing is sent. |
 | `apiFormat` | `off` | `anthropic` or `openai` sends every request to the HTTP API below instead of the picked model. |
 | `apiBaseUrl` | empty | Empty means `https://api.anthropic.com` for `anthropic`; required for `openai`. |
 | `apiModel` | empty | Model for the HTTP API. |
@@ -119,7 +127,7 @@ picker above it, not here.
 ## CLI
 
 ```sh
-bb next-prompt show [thread-id] [--json]      # current suggestion
+bb next-prompt show [thread-id] [--json]      # current suggestions, one per line
 bb next-prompt suggest [thread-id] [--json]   # generate now for an idle thread
 bb next-prompt context [thread-id]            # the transcript a request would send
 bb next-prompt status [--json]                # model route and the last outcomes
@@ -131,23 +139,25 @@ bb next-prompt model [<provider>/<model>[@<reasoning>] | reset]
 for example, `bb next-prompt model codex/gpt-6-luna@low`; the reasoning level
 defaults to `low`. `reset` returns to the default.
 
-Inside a bb thread the thread id defaults to the current thread.
-`status` lists why recent requests showed nothing: `filtered` (including the
-model's `null`), `timed out`, `cancelled` (the thread moved on first),
+Inside a bb thread the thread id defaults to the current thread. With `--json`,
+`show` and `suggest` give the list as `texts`.
+`status` lists why recent requests showed nothing: `none` (the model chose
+silence), `filtered` (a reply that failed the checks, with its text), `timed
+out`, `cancelled` (the thread moved on first), `skipped: short answer`,
 `skipped: queued messages`, `skipped: child threads running`, `unchanged:
 dismissed earlier` or `unchanged: silent earlier` (the stored result for the
 same conversation), or `failed` with the error. `suggest` ignores the stored
-result and always asks the model.
+result and the answer's length, and always asks the model.
 
 ## Install
 
 Requires bb 0.45 or later.
 
 ```sh
-bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@^0.3.0
+bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@^0.4.0
 ```
 
-bb installs the newest `0.3.x` release, and `bb plugin update next-prompt`
+bb installs the newest `0.4.x` release, and `bb plugin update next-prompt`
 moves to newer releases in that range. The first suggestion appears after the
 next turn that finishes in a visible thread.
 
@@ -166,17 +176,24 @@ After editing the source, run `bb plugin build && bb plugin reload next-prompt`.
 ```sh
 npm test            # node --test tests/*.test.ts
 npm run typecheck
-npm run eval -- --baseline HEAD --repeats 2
 ```
 
-`npm run eval` sends the labelled conversations in `eval/cases.json` to the
-suggestion model through `claude -p` and scores each reply: silence where the
-user should be left alone, a matching suggestion where one next step is
-grounded. `--baseline <rev>` runs that revision's prompt on the same cases, so
-a prompt change is compared with the one it replaces; `--model`,
-`--reasoning`, `--repeats`, `--concurrency` (4 requests at once by default)
-and `--output <file>` are optional. Each request bills like a real
-suggestion.
+`vendor/next-prompt-core.ts` is generated: change the library, not this copy.
+To update it, with a checkout of the library beside this one at the wanted tag:
+
+```sh
+node ../next-prompt-core/scripts/vendor.mjs vendor          # write the copy
+node ../next-prompt-core/scripts/vendor.mjs vendor --check  # check it matches
+```
+
+The prompt's eval lives in the library. To run it through this plugin's default
+route, from this directory:
+
+```sh
+node ../next-prompt-core/scripts/eval.ts --complete ./backend.ts --model claude-sonnet-5-5
+```
+
+Each request bills like a real suggestion.
 
 ## License
 

@@ -116,6 +116,19 @@ export default async function plugin(bb: BbPluginApi) {
 			options: ["cards", "ghost", "both"],
 			default: "cards",
 		},
+		cardClick: {
+			type: "select",
+			label: "Clicking a card",
+			description: "insert: puts the text in the draft for you to edit or send. send: sends it at once.",
+			options: ["insert", "send"],
+			default: "insert",
+		},
+		prefillBest: {
+			type: "boolean",
+			label: "Put the best suggestion in the draft",
+			description: "With display set to both: the best suggestion goes into the empty composer as real text, not grey text. The cards stay, and picking another replaces it. Nothing is sent.",
+			default: false,
+		},
 		apiFormat: {
 			type: "select",
 			label: "HTTP API override",
