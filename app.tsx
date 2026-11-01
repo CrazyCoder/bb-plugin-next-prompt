@@ -215,7 +215,7 @@ function SuggestionCards({
 						type="button"
 						className={`inline-flex min-w-0 max-w-full items-baseline gap-1 rounded-md border px-2 py-0.5 text-left ${
 							index === 0
-								? "border-primary bg-primary text-primary-foreground hover:opacity-90"
+								? "border-foreground bg-foreground text-background hover:bg-foreground/90"
 								: "border-border text-muted-foreground hover:text-foreground"
 						}`}
 						onClick={() => onPick(text)}
