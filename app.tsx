@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
 	definePluginApp,
+	experimental_Icon as Icon,
 	experimental_ProviderModelPicker as ProviderModelPicker,
 	useComposer,
 	useRealtime,
@@ -27,7 +28,10 @@ import type { Suggestion, rpcContract } from "./server.ts";
 const REARM_DELAY_MS = 300;
 const EXPANDED_KEY = "next-prompt:cards-expanded";
 /** The cards row's padding and dismiss button. */
-const ROW_CHROME_PX = 52;
+const ROW_CHROME_PX = 56;
+/** bb's own icon button, as on its dismiss controls. */
+const ICON_BUTTON =
+	"flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground";
 const EMPTY_DRAFT = { text: "", mentions: [] };
 
 /**
@@ -231,21 +235,16 @@ function SuggestionCards({
 			{fit < texts.length ? (
 				<button
 					type="button"
-					className="shrink-0 text-muted-foreground hover:text-foreground"
+					className={ICON_BUTTON}
 					onClick={toggleExpanded}
 					aria-expanded={expanded}
 					aria-label={expanded ? "Show fewer suggestions" : "Show all suggestions"}
 				>
-					{expanded ? "▴" : "▾"}
+					<Icon name={expanded ? "ChevronUp" : "ChevronDown"} className="size-3.5" aria-hidden="true" />
 				</button>
 			) : null}
-			<button
-				type="button"
-				className="shrink-0 text-muted-foreground hover:text-foreground"
-				onClick={onDismiss}
-				aria-label="Dismiss suggestions"
-			>
-				×
+			<button type="button" className={ICON_BUTTON} onClick={onDismiss} aria-label="Dismiss suggestions">
+				<Icon name="X" className="size-3.5" aria-hidden="true" />
 			</button>
 		</div>
 	);

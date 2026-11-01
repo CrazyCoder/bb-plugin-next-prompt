@@ -18,7 +18,7 @@ one. Nothing is sent: you edit or send the draft yourself. Set `cardClick` to
 `send` to make a click send the card at once; Tab, → and the swipe still only
 insert.
 
-The cards take one row. When some do not fit, **▾** expands the list, and the
+The cards take one row. When some do not fit, a chevron expands the list, and the
 browser remembers that choice. Typing hides the suggestions, and clearing the
 draft back to empty brings them back, without a new model request. To dismiss them, click **×**, or press **Esc** on the grey text.
 

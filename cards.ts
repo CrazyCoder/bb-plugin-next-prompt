@@ -2,7 +2,7 @@
 
 export const CARD_GAP_PX = 6;
 /** Width of the expand toggle, taken from the row only when it is needed. */
-const TOGGLE_PX = 28;
+const TOGGLE_PX = 32;
 
 /** Every card that fits, at least the best one. An unknown width of 0 shows only that one. */
 export function fitCount(widths: readonly number[], available: number): number {
