@@ -126,7 +126,7 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 
 	const accept = useCallback(() => {
 		if (!suggestion) return;
-		composer.insert(suggestion.text, { at: "end" });
+		composer.insert(suggestion.texts[0], { at: "end" });
 		composer.focus();
 	}, [composer, suggestion]);
 
@@ -151,7 +151,7 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 
 	useSwipeToAccept(rootRef, visible, accept);
 
-	const text = visible ? suggestion.text : null;
+	const text = visible ? suggestion.texts[0] : null;
 	const lines = composer.layout === "compact" ? 1 : 3;
 	useEffect(() => {
 		const root = rootRef.current;
@@ -178,7 +178,7 @@ function SuggestionBanner({ threadId, composer }: { threadId: string; composer: 
 			>
 				<span aria-hidden>↳</span>
 				<span className="shrink-0">next:</span>
-				<span className="truncate italic">{suggestion.text}</span>
+				<span className="truncate italic">{suggestion.texts[0]}</span>
 				<span className="shrink-0 opacity-60">Tab ↹</span>
 			</button>
 			<button

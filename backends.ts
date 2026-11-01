@@ -1,10 +1,11 @@
 // Lean model calls. Each takes the system prompt and transcript and resolves
-// to the raw reply text; filtering happens in suggest.ts. Providers other than
-// Claude Code and Codex run as hidden bb worker threads in server.ts.
+// to the raw reply text; next-prompt-core reads it in server.ts. Providers other
+// than Claude Code and Codex run as hidden bb worker threads in server.ts.
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SUGGESTION_DEFAULTS } from "./vendor/next-prompt-core.ts";
 
 /** A choice from bb's provider/model picker. */
 export interface ModelSelection {
@@ -174,7 +175,7 @@ export async function completeWithApi(config: ApiConfig, request: CompletionRequ
 			{ "anthropic-version": "2023-06-01", ...(config.apiKey ? { "x-api-key": config.apiKey } : {}) },
 			{
 				model: config.model,
-				max_tokens: 100,
+				max_tokens: SUGGESTION_DEFAULTS.maxTokens,
 				system: request.system,
 				messages: [{ role: "user", content: request.prompt }],
 			},
@@ -188,7 +189,7 @@ export async function completeWithApi(config: ApiConfig, request: CompletionRequ
 		config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {},
 		{
 			model: config.model,
-			max_tokens: 100,
+			max_tokens: SUGGESTION_DEFAULTS.maxTokens,
 			messages: [
 				{ role: "system", content: request.system },
 				{ role: "user", content: request.prompt },

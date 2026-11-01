@@ -54,7 +54,6 @@
   "scripts": {
     "test": "node --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "eval": "node scripts/eval.ts",
     "build": "bb plugin build"
   },
   "homepage": "https://github.com/CrazyCoder/bb-plugin-next-prompt#readme",

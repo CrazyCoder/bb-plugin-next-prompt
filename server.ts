@@ -1,8 +1,7 @@
 // Next Prompt backend: after a visible thread goes idle, ask a model for the
-// instruction the user is most likely to type next, and hold it for the composer
-// in app.tsx. Suggestions are display-only: nothing is written
+// instructions the user is most likely to type next, and hold them for the
+// composer in app.tsx. Suggestions are display-only: nothing is written
 // to the thread or the agent's context.
-import { createHash } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -16,11 +15,21 @@ import {
 	type ModelSelection,
 } from "./backends.ts";
 import { SUGGESTION_CHANGED } from "./shared.ts";
-import { SYSTEM_PROMPT, buildSuggestionPrompt, normalizeSuggestion } from "./suggest.ts";
+import { conversationMessages } from "./suggest.ts";
+import {
+	SYSTEM_PROMPT,
+	buildSuggestionPrompt,
+	fingerprint,
+	isEmptyReply,
+	lastAnswer,
+	normalizeSuggestions,
+	type Message,
+} from "./vendor/next-prompt-core.ts";
 
 const suggestionSchema = z.object({
 	threadId: z.string(),
-	text: z.string(),
+	/** Best first, never empty. */
+	texts: z.array(z.string()).min(1),
 	createdAt: z.string(),
 });
 export type Suggestion = z.infer<typeof suggestionSchema>;
@@ -60,18 +69,23 @@ type Outcome = { threadId: string; result: string; at: string };
  * What the plugin last concluded for a thread's conversation, kept in kv so a
  * reload or restart neither repeats the request nor brings back a dismissed
  * suggestion. The fingerprint covers the prompt, the model route and the
- * transcript; any change to them makes the record stale.
+ * transcript; any change to them makes the record stale. A "ready" record with
+ * no texts is invalid, so it is dropped and the thread asks again.
  */
-const storedSchema = z.object({
-	fingerprint: z.string(),
-	status: z.enum(["ready", "dismissed", "silent"]),
-	text: z.string().optional(),
-	createdAt: z.string(),
-});
+const storedSchema = z
+	.object({
+		fingerprint: z.string(),
+		status: z.enum(["ready", "dismissed", "silent"]),
+		texts: z.array(z.string()).optional(),
+		createdAt: z.string(),
+	})
+	.refine((record) => record.status !== "ready" || Boolean(record.texts?.length));
 type Stored = z.infer<typeof storedSchema>;
 type Held = Suggestion & { fingerprint: string };
 
 const MAX_TIMELINE_PAGES = 5;
+/** A shorter answer leaves nothing to follow up on. */
+const MIN_ANSWER_CHARS = 20;
 const MODEL_SELECTION_KEY = "model-selection";
 const STORED_PREFIX = "suggestion:";
 /** A child in any of these is queued, starting or running, so its parent is not done. */
@@ -92,15 +106,15 @@ export default async function plugin(bb: BbPluginApi) {
 		enabled: {
 			type: "boolean",
 			label: "Suggest the next prompt automatically",
-			description: "After each finished turn in a visible thread, generate one suggestion.",
+			description: "After each finished turn in a visible thread, generate up to three suggestions.",
 			default: true,
 		},
 		display: {
 			type: "select",
-			label: "Show the suggestion as",
-			description: "banner: a line above the composer. ghost: grey text inside the empty composer.",
-			options: ["banner", "ghost"],
-			default: "banner",
+			label: "Show suggestions as",
+			description: "cards: numbered cards above the composer. ghost: the best one as grey text inside the empty composer. both: cards and grey text.",
+			options: ["cards", "ghost", "both"],
+			default: "cards",
 		},
 		apiFormat: {
 			type: "select",
@@ -181,7 +195,7 @@ export default async function plugin(bb: BbPluginApi) {
 			permissionMode,
 			title: "Next prompt worker",
 			visibility: "hidden",
-			prompt: `${request.system}\n\nDo not use tools. Reply with the suggestion only.\n\n---\n\n${request.prompt}`,
+			prompt: `${request.system}\n\nDo not use tools. Reply with the JSON only, with no text around it.\n\n---\n\n${request.prompt}`,
 		});
 		try {
 			// Rejects as soon as the worker enters error, so a failed start does not run out the timeout.
@@ -224,10 +238,9 @@ export default async function plugin(bb: BbPluginApi) {
 	const outcomes: Outcome[] = [];
 	let disposed = false;
 
-	// Covers what decides the reply, not normalizeSuggestion's filter: a looser
-	// filter in a later release leaves "silent" records until the thread moves on.
-	const fingerprint = (prompt: string) =>
-		createHash("sha256").update(SYSTEM_PROMPT).update("\0").update(describeRoute()).update("\0").update(prompt).digest("hex");
+	// Covers what decides the reply, not normalizeSuggestions' checks: looser
+	// checks in a later release leave "silent" records until the thread moves on.
+	const requestPrint = (prompt: string) => fingerprint(SYSTEM_PROMPT, describeRoute(), prompt);
 
 	const readStored = async (threadId: string): Promise<Stored | undefined> => {
 		const key = `${STORED_PREFIX}${threadId}`;
@@ -242,7 +255,7 @@ export default async function plugin(bb: BbPluginApi) {
 		bb.storage.kv.set(`${STORED_PREFIX}${threadId}`, { ...record, createdAt: new Date().toISOString() });
 	const forgetStored = (threadId: string) => bb.storage.kv.delete(`${STORED_PREFIX}${threadId}`).catch(() => {});
 
-	const toSuggestion = (held: Held): Suggestion => ({ threadId: held.threadId, text: held.text, createdAt: held.createdAt });
+	const toSuggestion = (held: Held): Suggestion => ({ threadId: held.threadId, texts: held.texts, createdAt: held.createdAt });
 
 	const publish = (threadId: string) => {
 		if (disposed) return;
@@ -268,8 +281,15 @@ export default async function plugin(bb: BbPluginApi) {
 		if (suggestions.delete(threadId)) publish(threadId);
 	};
 
-	const readPrompt = async (threadId: string, signal?: AbortSignal): Promise<string | undefined> => {
+	const readConversation = async (
+		threadId: string,
+		signal?: AbortSignal,
+	): Promise<{ messages: Message[]; prompt: string | undefined }> => {
 		const pages: unknown[][] = [];
+		const build = () => {
+			const messages = conversationMessages(pages.flat(), threadId);
+			return { messages, prompt: buildSuggestionPrompt(messages, values.maxContextChars) };
+		};
 		let before: { id: string; seq: number } | undefined;
 		for (let page = 0; page < MAX_TIMELINE_PAGES; page += 1) {
 			const response = await bb.sdk.threads.timeline({
@@ -279,24 +299,24 @@ export default async function plugin(bb: BbPluginApi) {
 				signal,
 			});
 			pages.unshift(response.rows);
-			const prompt = buildSuggestionPrompt(pages.flat(), threadId, values.maxContextChars);
+			const { prompt } = build();
 			if (prompt && prompt.length >= values.maxContextChars) break;
 			const cursor = response.timelinePage.olderCursor;
 			if (!response.timelinePage.hasOlderRows || cursor === null) break;
 			before = { id: cursor.anchorId, seq: cursor.anchorSeq };
 		}
-		return buildSuggestionPrompt(pages.flat(), threadId, values.maxContextChars);
+		return build();
 	};
 
 	/**
-	 * Generate and store a suggestion; resolves to the stored text or a reason
-	 * it was not stored. With `reuse`, a stored record for the same
-	 * conversation answers instead of a new request.
+	 * Generate and store suggestions; resolves to the stored texts or a reason
+	 * none were stored. With `reuse`, a stored record for the same conversation
+	 * answers instead of a new request, and a short answer asks nothing.
 	 */
 	const generate = async (
 		threadId: string,
 		options: { reuse: boolean; signal?: AbortSignal },
-	): Promise<{ text?: string; reason: string }> => {
+	): Promise<{ texts?: string[]; reason: string }> => {
 		inFlight.get(threadId)?.abort();
 		const controller = new AbortController();
 		inFlight.set(threadId, controller);
@@ -305,31 +325,32 @@ export default async function plugin(bb: BbPluginApi) {
 		if (outerSignal) signals.push(outerSignal);
 		const signal = AbortSignal.any(signals);
 		try {
-			const prompt = await readPrompt(threadId, signal);
+			const { messages, prompt } = await readConversation(threadId, signal);
 			if (!prompt) return { reason: "no completed exchange" };
-			const hash = fingerprint(prompt);
+			if (options.reuse && lastAnswer(messages).length < MIN_ANSWER_CHARS) return { reason: "skipped: short answer" };
+			const hash = requestPrint(prompt);
 			restored.add(threadId);
 			const stored = options.reuse ? await readStored(threadId) : undefined;
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
 			if (stored?.fingerprint === hash) {
-				if (stored.status !== "ready" || !stored.text) return { reason: `unchanged: ${stored.status} earlier` };
-				suggestions.set(threadId, { threadId, text: stored.text, createdAt: stored.createdAt, fingerprint: hash });
+				if (stored.status !== "ready" || !stored.texts) return { reason: `unchanged: ${stored.status} earlier` };
+				suggestions.set(threadId, { threadId, texts: stored.texts, createdAt: stored.createdAt, fingerprint: hash });
 				publish(threadId);
-				return { text: stored.text, reason: "shown" };
+				return { texts: stored.texts, reason: "shown" };
 			}
 			const raw = await complete(threadId, { system: SYSTEM_PROMPT, prompt, signal });
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
-			const text = normalizeSuggestion(raw);
-			if (!text) {
+			const texts = normalizeSuggestions(raw);
+			if (texts.length === 0) {
 				await writeStored(threadId, { fingerprint: hash, status: "silent" });
-				return { reason: `filtered: ${JSON.stringify(raw.trim().slice(0, 120))}` };
+				return { reason: isEmptyReply(raw) ? "none: the model had nothing to suggest" : `filtered: ${JSON.stringify(raw.trim().slice(0, 120))}` };
 			}
-			const held: Held = { threadId, text, createdAt: new Date().toISOString(), fingerprint: hash };
-			await writeStored(threadId, { fingerprint: hash, status: "ready", text });
+			const held: Held = { threadId, texts, createdAt: new Date().toISOString(), fingerprint: hash };
+			await writeStored(threadId, { fingerprint: hash, status: "ready", texts });
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
 			suggestions.set(threadId, held);
 			publish(threadId);
-			return { text, reason: "shown" };
+			return { texts, reason: "shown" };
 		} catch (error) {
 			if (controller.signal.aborted || outerSignal?.aborted) return { reason: "cancelled" };
 			if (signal.aborted) return { reason: "timed out" };
@@ -339,13 +360,16 @@ export default async function plugin(bb: BbPluginApi) {
 		}
 	};
 
+	const outcomeOf = ({ texts, reason }: { texts?: string[]; reason: string }) =>
+		texts ? `shown: ${texts.join(" | ")}` : reason;
+
 	// Child threads are driven by their parent agent, so a suggestion there
 	// would cost a request nobody reads.
 	const isTarget = (thread: ThreadEventTarget) =>
 		thread.visibility !== "hidden" && !thread.parentThreadId && thread.originPluginId !== bb.pluginId;
 
 	/**
-	 * The thread's suggestion. After a reload the first call checks the stored
+	 * The thread's suggestions. After a reload the first call checks the stored
 	 * record against the current conversation and shows it only when the
 	 * fingerprint still matches.
 	 */
@@ -364,21 +388,21 @@ export default async function plugin(bb: BbPluginApi) {
 	const restore = async (threadId: string): Promise<Held | null> => {
 		const start = epoch(threadId);
 		const stored = await readStored(threadId);
-		if (stored?.status !== "ready" || !stored.text) {
+		if (stored?.status !== "ready" || !stored.texts) {
 			restored.add(threadId);
 			return null;
 		}
 		const thread = await bb.sdk.threads.get({ threadId });
-		const prompt = thread.status === "idle" ? await readPrompt(threadId) : undefined;
+		const prompt = thread.status === "idle" ? (await readConversation(threadId)).prompt : undefined;
 		// The thread moved on during the check; clear() has dropped the record.
 		if (epoch(threadId) !== start) return suggestions.get(threadId) ?? null;
 		restored.add(threadId);
-		if (!prompt || fingerprint(prompt) !== stored.fingerprint) {
+		if (!prompt || requestPrint(prompt) !== stored.fingerprint) {
 			await forgetStored(threadId);
 			return null;
 		}
 		if (suggestions.has(threadId) || inFlight.has(threadId)) return suggestions.get(threadId) ?? null;
-		const restoredHeld: Held = { threadId, text: stored.text, createdAt: stored.createdAt, fingerprint: stored.fingerprint };
+		const restoredHeld: Held = { threadId, texts: stored.texts, createdAt: stored.createdAt, fingerprint: stored.fingerprint };
 		suggestions.set(threadId, restoredHeld);
 		return restoredHeld;
 	};
@@ -401,7 +425,7 @@ export default async function plugin(bb: BbPluginApi) {
 			record(thread.id, "skipped: child threads running");
 			return;
 		}
-		void generate(thread.id, { reuse: true }).then(({ text, reason }) => record(thread.id, text ? `shown: ${text}` : reason));
+		void generate(thread.id, { reuse: true }).then((result) => record(thread.id, outcomeOf(result)));
 	});
 	bb.events.on("thread.active", ({ thread }) => clear(thread.id));
 	bb.events.on("thread.failed", ({ thread }) => clear(thread.id));
@@ -431,8 +455,8 @@ export default async function plugin(bb: BbPluginApi) {
 
 	const usage = [
 		"Usage:",
-		"  bb next-prompt show [thread-id] [--json]      Print the current suggestion",
-		"  bb next-prompt suggest [thread-id] [--json]   Generate a suggestion now",
+		"  bb next-prompt show [thread-id] [--json]      Print the current suggestions, best first",
+		"  bb next-prompt suggest [thread-id] [--json]   Generate suggestions now",
 		"  bb next-prompt context [thread-id]            Print the transcript a request would send",
 		"  bb next-prompt status [--json]                Show the model route and recent outcomes",
 		"  bb next-prompt model [<provider>/<model>[@<reasoning>] | reset]",
@@ -442,8 +466,8 @@ export default async function plugin(bb: BbPluginApi) {
 		name: "next-prompt",
 		summary: "Show or generate next-prompt suggestions for BB threads",
 		commands: [
-			{ name: "show", summary: "Print a thread's current suggestion", usage: "bb next-prompt show [thread-id] [--json]" },
-			{ name: "suggest", summary: "Generate a suggestion for an idle thread now", usage: "bb next-prompt suggest [thread-id] [--json]" },
+			{ name: "show", summary: "Print a thread's current suggestions", usage: "bb next-prompt show [thread-id] [--json]" },
+			{ name: "suggest", summary: "Generate suggestions for an idle thread now", usage: "bb next-prompt suggest [thread-id] [--json]" },
 			{ name: "context", summary: "Print the transcript a suggestion request would send", usage: "bb next-prompt context [thread-id]" },
 			{ name: "status", summary: "Show the model route and recent outcomes", usage: "bb next-prompt status [--json]" },
 			{
@@ -468,7 +492,7 @@ export default async function plugin(bb: BbPluginApi) {
 					const suggestion = held ? toSuggestion(held) : null;
 					if (json) return { exitCode: 0, stdout: JSON.stringify(suggestion) };
 					return suggestion
-						? { exitCode: 0, stdout: suggestion.text }
+						? { exitCode: 0, stdout: suggestion.texts.join("\n") }
 						: { exitCode: 1, stderr: `No suggestion for ${threadId}.` };
 				}
 				case "suggest": {
@@ -476,15 +500,15 @@ export default async function plugin(bb: BbPluginApi) {
 					const thread = await bb.sdk.threads.get({ threadId, signal: context.signal });
 					if (thread.status !== "idle") return { exitCode: 1, stderr: `Thread ${threadId} is ${thread.status}; wait until it is idle.` };
 					const result = await generate(threadId, { reuse: false, signal: context.signal });
-					record(threadId, result.text ? `shown: ${result.text}` : result.reason);
-					if (json) return { exitCode: result.text ? 0 : 1, stdout: JSON.stringify(result) };
-					return result.text
-						? { exitCode: 0, stdout: result.text }
+					record(threadId, outcomeOf(result));
+					if (json) return { exitCode: result.texts ? 0 : 1, stdout: JSON.stringify(result) };
+					return result.texts
+						? { exitCode: 0, stdout: result.texts.join("\n") }
 						: { exitCode: 1, stderr: `No suggestion (${result.reason}).` };
 				}
 				case "context": {
 					if (!threadId) return needThread;
-					const prompt = await readPrompt(threadId, context.signal);
+					const { prompt } = await readConversation(threadId, context.signal);
 					return prompt
 						? { exitCode: 0, stdout: prompt }
 						: { exitCode: 1, stderr: "The thread has no completed exchange yet." };
@@ -506,6 +530,7 @@ export default async function plugin(bb: BbPluginApi) {
 				case "status": {
 					const status = {
 						enabled: values.enabled,
+						display: values.display,
 						model: describeRoute(),
 						inFlight: [...inFlight.keys()],
 						recent: outcomes.slice(-10),
@@ -513,6 +538,7 @@ export default async function plugin(bb: BbPluginApi) {
 					if (json) return { exitCode: 0, stdout: JSON.stringify(status) };
 					const lines = [
 						`enabled: ${status.enabled}`,
+						`display: ${status.display}`,
 						`model: ${status.model}`,
 						`in flight: ${status.inFlight.length}`,
 						"recent:",

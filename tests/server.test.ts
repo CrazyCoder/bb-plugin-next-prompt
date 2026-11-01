@@ -84,14 +84,142 @@ async function idle(current: FakePluginHost) {
 }
 
 async function shown(current: FakePluginHost): Promise<string | null> {
-	const result = (await current.harness.callRpc("suggestion_get", { threadId: T })) as { suggestion: { text: string } | null };
-	return result.suggestion?.text ?? null;
+	const result = await suggestionTexts(current);
+	return result?.join(" | ") ?? null;
+}
+
+async function suggestionTexts(current: FakePluginHost): Promise<string[] | null> {
+	const result = (await current.harness.callRpc("suggestion_get", { threadId: T })) as { suggestion: { texts: string[] } | null };
+	return result.suggestion?.texts ?? null;
 }
 
 async function lastOutcome(current: FakePluginHost): Promise<string | undefined> {
 	const status = JSON.parse((await current.harness.runCli(["status", "--json"])).stdout) as { recent: Array<{ result: string }> };
 	return status.recent.at(-1)?.result;
 }
+
+test("keeps up to three suggestions, best first", async () => {
+	const current = host();
+	await plugin(current.bb);
+	replies.push('{"suggestions": ["run the tests", "show me the diff first", "no, leave it", "commit this"]}');
+	await idle(current);
+	assert.deepEqual(await suggestionTexts(current), ["run the tests", "show me the diff first", "no, leave it"]);
+	assert.equal(await lastOutcome(current), "shown: run the tests | show me the diff first | no, leave it");
+});
+
+test("show and suggest print one suggestion per line and the list as JSON", async () => {
+	const current = host();
+	await plugin(current.bb);
+	replies.push('{"suggestions": ["run the tests", "no, leave it"]}');
+	const suggested = await current.harness.runCli(["suggest", T]);
+	assert.equal(suggested.stdout, "run the tests\nno, leave it");
+	assert.equal((await current.harness.runCli(["show", T])).stdout, "run the tests\nno, leave it");
+	const json = JSON.parse((await current.harness.runCli(["show", T, "--json"])).stdout) as { texts: string[] };
+	assert.deepEqual(json.texts, ["run the tests", "no, leave it"]);
+	replies.push('{"suggestions": ["commit this"]}');
+	const again = JSON.parse((await current.harness.runCli(["suggest", T, "--json"])).stdout) as { texts: string[]; reason: string };
+	assert.deepEqual(again, { texts: ["commit this"], reason: "shown" });
+});
+
+test("a reply that is not JSON shows nothing and says so", async () => {
+	const current = host();
+	await plugin(current.bb);
+	replies.push("run the tests");
+	await idle(current);
+	assert.equal(await shown(current), null);
+	assert.equal(await lastOutcome(current), 'filtered: "run the tests"');
+});
+
+test("the model's silence is told apart from a rejected reply", async () => {
+	const current = host();
+	await plugin(current.bb);
+	replies.push('{"suggestions": []}');
+	await idle(current);
+	assert.equal(await lastOutcome(current), "none: the model had nothing to suggest");
+});
+
+test("a short answer asks nothing, but a suggestion by command does", async () => {
+	rows = conversation("Done.");
+	const current = host();
+	await plugin(current.bb);
+	await idle(current);
+	assert.equal(requests, 0);
+	assert.equal(await lastOutcome(current), "skipped: short answer");
+	replies.push('{"suggestions": ["run the tests"]}');
+	await current.harness.runCli(["suggest", T]);
+	assert.equal(requests, 1);
+});
+
+test("the API request leaves room for three suggestions", async () => {
+	const bodies: Array<{ max_tokens: number }> = [];
+	globalThis.fetch = (async (_url: string, init: RequestInit) => {
+		bodies.push(JSON.parse(String(init.body)) as { max_tokens: number });
+		return new Response(JSON.stringify({ content: [{ type: "text", text: '{"suggestions": []}' }] }));
+	}) as typeof fetch;
+	const current = host();
+	await plugin(current.bb);
+	await idle(current);
+	assert.equal(bodies[0]?.max_tokens, 400);
+});
+
+test("a worker thread is told to answer with the JSON the library reads", async () => {
+	let prompt = "";
+	const current = createFakePluginHost({
+		pluginId: "next-prompt",
+		sdk: {
+			threads: {
+				timeline: async () => ({ rows, timelinePage: { hasOlderRows: false, olderCursor: null } }),
+				count: async () => ({ total: 0 }),
+				get: async () => makeThreadResponse({ id: T, status: "idle" }),
+				spawn: async (args) => {
+					prompt = String(args?.prompt);
+					return makeThreadResponse({ id: "thr_worker", status: "idle" });
+				},
+				wait: async () => makeThreadResponse({ id: "thr_worker", status: "idle" }),
+				output: async () => ({ output: '{"suggestions": ["run the tests", "no, leave it"]}' }),
+				archive: async () => makeThreadResponse({ id: "thr_worker", status: "idle" }),
+				stop: async () => makeThreadResponse({ id: "thr_worker", status: "idle" }),
+			},
+			system: {
+				executionOptions: async () => ({ providers: [{ id: "pi", capabilities: { permissionModes: ["accept-edits"] } }] }),
+			},
+		},
+	} as Parameters<typeof createFakePluginHost>[0]);
+	await plugin(current.bb);
+	await current.harness.callRpc("model_set", { providerId: "pi", model: "any", reasoningLevel: "low" });
+	await idle(current);
+	assert.match(prompt, /Reply with ONLY JSON/);
+	assert.match(prompt, /Reply with the JSON only/);
+	assert.doesNotMatch(prompt, /suggestion only/);
+	assert.deepEqual(await suggestionTexts(current), ["run the tests", "no, leave it"]);
+});
+
+test("a saved display of banner becomes cards", async () => {
+	const current = createFakePluginHost({
+		pluginId: "next-prompt",
+		settings: { display: "banner", apiFormat: "anthropic", apiModel: "test-model" },
+	});
+	await plugin(current.bb);
+	const status = JSON.parse((await current.harness.runCli(["status", "--json"])).stdout) as { display: string };
+	assert.equal(status.display, "cards");
+});
+
+test("a record in the old one-text format is dropped and the thread asks again", async () => {
+	const first = host();
+	await plugin(first.bb);
+	await first.bb.storage.kv.set(`suggestion:${T}`, {
+		fingerprint: "old",
+		status: "ready",
+		text: "old suggestion",
+		createdAt: new Date().toISOString(),
+	});
+	const second = await first.harness.reload(plugin);
+	assert.equal(await shown(second), null);
+	replies.push('{"suggestions": ["run the tests"]}');
+	await idle(second);
+	assert.equal(requests, 1);
+	assert.equal(await shown(second), "run the tests");
+});
 
 test("skips a parent whose child threads are still running", async () => {
 	const current = host();
