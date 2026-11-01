@@ -277,7 +277,8 @@ function Suggestions({ threadId, composer }: { threadId: string; composer: Plugi
 		if (!prefill || !offered || best === null) return;
 		if (prefills.get(threadId)?.suggestionAt === suggestion.createdAt) return;
 		prefills.set(threadId, { suggestionAt: suggestion.createdAt, owned: best });
-		composer.insert(best, { at: "end" });
+		// Replaces rather than inserts: an empty composer can still hold whitespace.
+		composer.replace({ text: best, mentions: [] });
 	}, [prefill, offered, best, suggestion, threadId, composer]);
 
 	// Dismissed or outdated, the prefilled text goes too, unless the user edited it.
