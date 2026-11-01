@@ -25,8 +25,8 @@ request. To dismiss them, click **×**, or press **Esc** on the grey text.
 
 With `display` set to `both` and `prefillBest` on, the best suggestion goes into
 the empty composer as real text instead of grey text. The cards stay until you
-edit the draft, and a click replaces the text with the card's. Dismissing them,
-or a new turn, takes the unedited text out again.
+edit the draft or pick one, and a click replaces the text with the card's.
+Dismissing them, or a new turn, takes the unedited text out again.
 
 Suggestions are display-only. The plugin writes nothing into the thread or the
 agent's context, and a new turn, a failure, archiving or deleting the thread

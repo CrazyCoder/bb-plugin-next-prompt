@@ -313,6 +313,28 @@ test("the whole list survives a reload, in order", async () => {
 	assert.equal(requests, 1);
 });
 
+test("a restored suggestion keeps its timestamp, which the app uses as its identity", async () => {
+	const createdAt = async (current: FakePluginHost) =>
+		((await current.harness.callRpc("suggestion_get", { threadId: T })) as { suggestion: { createdAt: string } }).suggestion.createdAt;
+	const realToISOString = Date.prototype.toISOString;
+	let tick = 0;
+	Date.prototype.toISOString = function () {
+		tick += 1;
+		return realToISOString.call(new Date(this.getTime() + tick));
+	};
+	try {
+		const first = host();
+		await plugin(first.bb);
+		replies.push('{"suggestions": ["run the tests"]}');
+		await idle(first);
+		const before = await createdAt(first);
+		const second = await first.harness.reload(plugin);
+		assert.equal(await createdAt(second), before);
+	} finally {
+		Date.prototype.toISOString = realToISOString;
+	}
+});
+
 test("a stored suggestion is not shown once the conversation changed", async () => {
 	const first = host();
 	await plugin(first.bb);

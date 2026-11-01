@@ -264,8 +264,8 @@ export default async function plugin(bb: BbPluginApi) {
 		await bb.storage.kv.delete(key);
 		return undefined;
 	};
-	const writeStored = (threadId: string, record: Omit<Stored, "createdAt">) =>
-		bb.storage.kv.set(`${STORED_PREFIX}${threadId}`, { ...record, createdAt: new Date().toISOString() });
+	const writeStored = (threadId: string, record: Omit<Stored, "createdAt"> & { createdAt?: string }) =>
+		bb.storage.kv.set(`${STORED_PREFIX}${threadId}`, { createdAt: new Date().toISOString(), ...record });
 	const forgetStored = (threadId: string) => bb.storage.kv.delete(`${STORED_PREFIX}${threadId}`).catch(() => {});
 
 	const toSuggestion = (held: Held): Suggestion => ({ threadId: held.threadId, texts: held.texts, createdAt: held.createdAt });
@@ -323,12 +323,13 @@ export default async function plugin(bb: BbPluginApi) {
 
 	/**
 	 * Generate and store suggestions; resolves to the stored texts or a reason
-	 * none were stored. With `reuse`, a stored record for the same conversation
-	 * answers instead of a new request, and a short answer asks nothing.
+	 * none were stored. An `automatic` run, as opposed to one the user asked for,
+	 * takes a stored record for the same conversation instead of a new request,
+	 * and asks nothing after a short answer.
 	 */
 	const generate = async (
 		threadId: string,
-		options: { reuse: boolean; signal?: AbortSignal },
+		options: { automatic: boolean; signal?: AbortSignal },
 	): Promise<{ texts?: string[]; reason: string }> => {
 		inFlight.get(threadId)?.abort();
 		const controller = new AbortController();
@@ -340,10 +341,10 @@ export default async function plugin(bb: BbPluginApi) {
 		try {
 			const { messages, prompt } = await readConversation(threadId, signal);
 			if (!prompt) return { reason: "no completed exchange" };
-			if (options.reuse && lastAnswer(messages).length < MIN_ANSWER_CHARS) return { reason: "skipped: short answer" };
+			if (options.automatic && lastAnswer(messages).length < MIN_ANSWER_CHARS) return { reason: "skipped: short answer" };
 			const hash = requestPrint(prompt);
 			restored.add(threadId);
-			const stored = options.reuse ? await readStored(threadId) : undefined;
+			const stored = options.automatic ? await readStored(threadId) : undefined;
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
 			if (stored?.fingerprint === hash) {
 				if (stored.status !== "ready" || !stored.texts) return { reason: `unchanged: ${stored.status} earlier` };
@@ -358,8 +359,10 @@ export default async function plugin(bb: BbPluginApi) {
 				await writeStored(threadId, { fingerprint: hash, status: "silent" });
 				return { reason: isEmptyReply(raw) ? "none: the model had nothing to suggest" : `filtered: ${JSON.stringify(raw.trim().slice(0, 120))}` };
 			}
-			const held: Held = { threadId, texts, createdAt: new Date().toISOString(), fingerprint: hash };
-			await writeStored(threadId, { fingerprint: hash, status: "ready", texts });
+			// One timestamp: the app tells a restored suggestion from a new one by it.
+			const createdAt = new Date().toISOString();
+			const held: Held = { threadId, texts, createdAt, fingerprint: hash };
+			await writeStored(threadId, { fingerprint: hash, status: "ready", texts, createdAt });
 			if (inFlight.get(threadId) !== controller) return { reason: "superseded" };
 			suggestions.set(threadId, held);
 			publish(threadId);
@@ -438,7 +441,7 @@ export default async function plugin(bb: BbPluginApi) {
 			record(thread.id, "skipped: child threads running");
 			return;
 		}
-		void generate(thread.id, { reuse: true }).then((result) => record(thread.id, outcomeOf(result)));
+		void generate(thread.id, { automatic: true }).then((result) => record(thread.id, outcomeOf(result)));
 	});
 	bb.events.on("thread.active", ({ thread }) => clear(thread.id));
 	bb.events.on("thread.failed", ({ thread }) => clear(thread.id));
@@ -512,7 +515,7 @@ export default async function plugin(bb: BbPluginApi) {
 					if (!threadId) return needThread;
 					const thread = await bb.sdk.threads.get({ threadId, signal: context.signal });
 					if (thread.status !== "idle") return { exitCode: 1, stderr: `Thread ${threadId} is ${thread.status}; wait until it is idle.` };
-					const result = await generate(threadId, { reuse: false, signal: context.signal });
+					const result = await generate(threadId, { automatic: false, signal: context.signal });
 					record(threadId, outcomeOf(result));
 					if (json) return { exitCode: result.texts ? 0 : 1, stdout: JSON.stringify(result) };
 					return result.texts

@@ -27,8 +27,12 @@ const EXPANDED_KEY = "next-prompt:cards-expanded";
 const ROW_CHROME_PX = 52;
 const EMPTY_DRAFT = { text: "", mentions: [] };
 
-/** The suggestion each thread last prefilled, so clearing the draft does not bring it back. */
-const prefilledFor = new Map<string, string>();
+/**
+ * Each thread's last prefill. `suggestionAt` keeps a cleared draft from filling
+ * again; `owned` is the text still ours to remove, null once the user changes
+ * the draft. Outlives the component, as the draft does when threads switch.
+ */
+const prefills = new Map<string, { suggestionAt: string; owned: string | null }>();
 
 function useSuggestion(threadId: string) {
 	const rpc = useRpc<typeof rpcContract>();
@@ -36,9 +40,10 @@ function useSuggestion(threadId: string) {
 	// previous thread's suggestion, even when its response arrives late.
 	const [loaded, setLoaded] = useState<{ threadId: string; suggestion: Suggestion | null } | null>(null);
 	const refetch = useCallback(() => {
+		// A failed read says nothing about the suggestion, so what is loaded stays.
 		rpc.call("suggestion_get", { threadId }).then(
 			(result) => setLoaded({ threadId, suggestion: result.suggestion }),
-			() => setLoaded({ threadId, suggestion: null }),
+			() => {},
 		);
 	}, [rpc, threadId]);
 	useEffect(refetch, [refetch]);
@@ -50,8 +55,8 @@ function useSuggestion(threadId: string) {
 		setLoaded({ threadId, suggestion: null });
 		void rpc.call("suggestion_dismiss", { threadId }).catch(() => {});
 	}, [rpc, threadId]);
-	const suggestion = loaded?.threadId === threadId ? loaded.suggestion : null;
-	return { suggestion, dismiss };
+	const isLoaded = loaded?.threadId === threadId;
+	return { suggestion: isLoaded ? loaded.suggestion : null, isLoaded, dismiss };
 }
 
 /** False while the user has typed, and for a moment after clearing the draft again. */
@@ -244,7 +249,7 @@ function SuggestionCards({
 }
 
 function Suggestions({ threadId, composer }: { threadId: string; composer: PluginComposerApi }) {
-	const { suggestion, dismiss } = useSuggestion(threadId);
+	const { suggestion, isLoaded, dismiss } = useSuggestion(threadId);
 	const settings = useSettings().values;
 	const cards = settings?.display !== "ghost";
 	const ghost = settings?.display === "ghost" || settings?.display === "both";
@@ -256,23 +261,32 @@ function Suggestions({ threadId, composer }: { threadId: string; composer: Plugi
 	const available = suggestion !== null && !composer.isRunning;
 	/** The empty composer offers the best suggestion: grey text, Tab, → and swipe act on it. */
 	const offered = available && armed && composer.isEmpty;
-	/** The draft holds the unedited best suggestion, so the cards stay to pick another. */
-	const prefilled = available && prefill && composer.text.trim() === best;
+	const lastPrefill = prefills.get(threadId);
+	/** The draft holds the unedited prefill, so the cards stay to pick another. */
+	const prefilled =
+		available && prefill && lastPrefill?.suggestionAt === suggestion.createdAt && lastPrefill.owned === composer.text;
 
-	const lastPrefill = useRef<string | null>(null);
+	// Before the prefill effect: this commit's text predates an insert made there.
+	const { text: draftText } = composer;
 	useEffect(() => {
-		if (!prefill || !offered || best === null || prefilledFor.get(threadId) === suggestion.createdAt) return;
-		prefilledFor.set(threadId, suggestion.createdAt);
-		lastPrefill.current = best;
+		const record = prefills.get(threadId);
+		if (record && record.owned !== draftText) record.owned = null;
+	}, [draftText, threadId]);
+
+	useEffect(() => {
+		if (!prefill || !offered || best === null) return;
+		if (prefills.get(threadId)?.suggestionAt === suggestion.createdAt) return;
+		prefills.set(threadId, { suggestionAt: suggestion.createdAt, owned: best });
 		composer.insert(best, { at: "end" });
 	}, [prefill, offered, best, suggestion, threadId, composer]);
 
 	// Dismissed or outdated, the prefilled text goes too, unless the user edited it.
 	useEffect(() => {
-		if (suggestion !== null || lastPrefill.current === null) return;
-		if (composer.text.trim() === lastPrefill.current) composer.replace(EMPTY_DRAFT);
-		lastPrefill.current = null;
-	}, [suggestion, composer]);
+		const record = prefills.get(threadId);
+		if (!isLoaded || suggestion !== null || !record || record.owned === null) return;
+		record.owned = null;
+		composer.replace(EMPTY_DRAFT);
+	}, [isLoaded, suggestion, threadId, composer]);
 
 	const accept = useCallback(() => {
 		if (best === null) return;
@@ -312,7 +326,7 @@ function Suggestions({ threadId, composer }: { threadId: string; composer: Plugi
 	useSwipeToAccept(rootRef, offered, accept);
 
 	// The moment before the prefill lands draws no grey text; after the user clears the draft it does.
-	const prefillPending = prefill && suggestion !== null && prefilledFor.get(threadId) !== suggestion.createdAt;
+	const prefillPending = prefill && lastPrefill?.suggestionAt !== suggestion?.createdAt;
 	const text = offered && !prefillPending ? best : null;
 	const lines = composer.layout === "compact" ? 1 : 3;
 	useEffect(() => {
