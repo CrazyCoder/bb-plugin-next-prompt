@@ -207,17 +207,16 @@ test("a saved display of banner becomes cards", async () => {
 test("a record in the old one-text format is dropped and the thread asks again", async () => {
 	const first = host();
 	await plugin(first.bb);
-	await first.bb.storage.kv.set(`suggestion:${T}`, {
-		fingerprint: "old",
-		status: "ready",
-		text: "old suggestion",
-		createdAt: new Date().toISOString(),
-	});
+	replies.push('{"suggestions": ["commit this"]}');
+	await idle(first);
+	const key = `suggestion:${T}`;
+	const { fingerprint } = (await first.bb.storage.kv.get(key)) as { fingerprint: string };
+	await first.bb.storage.kv.set(key, { fingerprint, status: "ready", text: "old suggestion", createdAt: new Date().toISOString() });
 	const second = await first.harness.reload(plugin);
 	assert.equal(await shown(second), null);
 	replies.push('{"suggestions": ["run the tests"]}');
 	await idle(second);
-	assert.equal(requests, 1);
+	assert.equal(requests, 2);
 	assert.equal(await shown(second), "run the tests");
 });
 
