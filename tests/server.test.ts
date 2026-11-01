@@ -304,6 +304,16 @@ test("a suggestion survives a reload without a new request", async () => {
 	assert.equal(await shown(second), "run the tests");
 });
 
+test("the whole list survives a reload, in order", async () => {
+	const first = host();
+	await plugin(first.bb);
+	replies.push('{"suggestions": ["run the tests", "no, leave it"]}');
+	await idle(first);
+	const second = await first.harness.reload(plugin);
+	assert.deepEqual(await suggestionTexts(second), ["run the tests", "no, leave it"]);
+	assert.equal(requests, 1);
+});
+
 test("a stored suggestion is not shown once the conversation changed", async () => {
 	const first = host();
 	await plugin(first.bb);
