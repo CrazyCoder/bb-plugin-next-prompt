@@ -20,8 +20,7 @@ insert.
 
 The cards take one row. When some do not fit, **▾** expands the list, and the
 browser remembers that choice. Typing hides the suggestions, and clearing the
-draft back to empty brings them back after 1.5 seconds, without a new model
-request. To dismiss them, click **×**, or press **Esc** on the grey text.
+draft back to empty brings them back, without a new model request. To dismiss them, click **×**, or press **Esc** on the grey text.
 
 With `display` set to `both` and `prefillBest` on, the best suggestion goes into
 the empty composer as real text instead of grey text. The cards stay until you

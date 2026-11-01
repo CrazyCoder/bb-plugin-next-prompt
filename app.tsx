@@ -20,8 +20,11 @@ import { SUGGESTION_CHANGED } from "./shared.ts";
 import { SwipeTracker } from "./swipe.ts";
 import type { Suggestion, rpcContract } from "./server.ts";
 
-/** Delay before a suggestion reappears after the draft is cleared back to empty. */
-const REARM_DELAY_MS = 1_500;
+/**
+ * Delay before suggestions reappear after the draft is cleared back to empty.
+ * Sending empties the draft too, just before the thread reports it is running.
+ */
+const REARM_DELAY_MS = 300;
 const EXPANDED_KEY = "next-prompt:cards-expanded";
 /** The cards row's padding and dismiss button. */
 const ROW_CHROME_PX = 52;
@@ -216,7 +219,7 @@ function SuggestionCards({
 						className={`inline-flex min-w-0 max-w-full items-baseline gap-1 rounded-md border px-2 py-0.5 text-left ${
 							index === 0
 								? "border-foreground bg-foreground text-background hover:bg-foreground/90"
-								: "border-border text-muted-foreground hover:text-foreground"
+								: "border-border text-foreground hover:bg-secondary"
 						}`}
 						onClick={() => onPick(text)}
 						title={title}
