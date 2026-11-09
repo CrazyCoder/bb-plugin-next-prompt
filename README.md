@@ -152,13 +152,28 @@ result and the answer's length, and always asks the model.
 
 Requires bb 0.45 or later.
 
+From the BB Community catalog:
+
 ```sh
-bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@^0.4.0
+bb plugin install next-prompt
 ```
 
-bb installs the newest `0.4.x` release, and `bb plugin update next-prompt`
-moves to newer releases in that range. The first suggestion appears after the
-next turn that finishes in a visible thread.
+Or from the repository:
+
+```sh
+bb plugin install git:https://github.com/CrazyCoder/bb-plugin-next-prompt.git@'>=0.4.0'
+```
+
+bb installs the newest release, and `bb plugin update next-prompt` moves to
+each later one. bb does not update plugins on its own, so run that command to
+get a new release. The first suggestion appears after the next turn that
+finishes in a visible thread.
+
+bb keeps the version range given at install, and an update never leaves it.
+For 0.x versions a caret range such as `^0.3.0` allows only `0.3.x`, so an
+install made with one does not reach later releases. Remove the plugin and
+install it again with the command above. Removing it also deletes its
+settings.
 
 From a clone, for development:
 
